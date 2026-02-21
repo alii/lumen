@@ -2,4 +2,7 @@
 *.ez
 /build
 erl_crash.dump
-/vendor/
+/vendor/*/
+!/vendor/test262-parser-tests
+.DS_Store
+PLAN.md
