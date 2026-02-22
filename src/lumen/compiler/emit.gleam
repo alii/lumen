@@ -12,8 +12,8 @@ import lumen/vm/opcode.{
   IrDefineField, IrDup, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
   IrGetThis, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
   IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem,
-  IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
-  IrThrow, IrTypeOf, IrUnaryOp,
+  IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrThrow,
+  IrTypeOf, IrUnaryOp,
 }
 import lumen/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -729,6 +729,10 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       }
     }
 
+    ast.SwitchStatement(discriminant, cases) -> {
+      emit_switch(e, discriminant, cases)
+    }
+
     ast.BreakStatement(None) -> {
       case e.loop_stack {
         [ctx, ..] -> {
@@ -1048,8 +1052,179 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrCallConstructor(list.length(args)))
     }
 
+    // Template literal: `text ${expr} more`
+    // Desugar to string concatenation: "" + "text " + expr + " more"
+    ast.TemplateLiteral(quasis, expressions) ->
+      emit_template_literal(e, quasis, expressions)
+
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
+}
+
+fn emit_template_literal(
+  e: Emitter,
+  quasis: List(String),
+  expressions: List(ast.Expression),
+) -> Result(Emitter, EmitError) {
+  // Template literal `a${x}b${y}c` has quasis=["a","b","c"], expressions=[x,y]
+  // Desugar to: "a" + x + "b" + y + "c"
+  case quasis {
+    [] -> Ok(push_const(e, JsString("")))
+    [first, ..rest_quasis] -> {
+      // Start with the first quasi string
+      let e = push_const(e, JsString(first))
+      // Interleave: for each expression, Add it, then Add the next quasi
+      emit_template_parts(e, expressions, rest_quasis)
+    }
+  }
+}
+
+fn emit_template_parts(
+  e: Emitter,
+  expressions: List(ast.Expression),
+  quasis: List(String),
+) -> Result(Emitter, EmitError) {
+  case expressions, quasis {
+    [expr, ..rest_exprs], [quasi, ..rest_quasis] -> {
+      // Emit expression, concat with accumulator
+      use e <- result.try(emit_expr(e, expr))
+      let e = emit_ir(e, IrBinOp(opcode.Add))
+      // Emit next quasi string, concat
+      let e = push_const(e, JsString(quasi))
+      let e = emit_ir(e, IrBinOp(opcode.Add))
+      emit_template_parts(e, rest_exprs, rest_quasis)
+    }
+    // If there are trailing expressions without quasis (shouldn't happen but safe)
+    [expr, ..rest_exprs], [] -> {
+      use e <- result.try(emit_expr(e, expr))
+      let e = emit_ir(e, IrBinOp(opcode.Add))
+      emit_template_parts(e, rest_exprs, [])
+    }
+    // Done
+    [], _ -> Ok(e)
+  }
+}
+
+fn emit_switch(
+  e: Emitter,
+  discriminant: ast.Expression,
+  cases: List(ast.SwitchCase),
+) -> Result(Emitter, EmitError) {
+  let #(e, end_label) = fresh_label(e)
+
+  // Push break context for switch (break; exits the switch)
+  // Preserve parent continue_label if inside a loop
+  let parent_continue = case e.loop_stack {
+    [ctx, ..] -> ctx.continue_label
+    [] -> -1
+  }
+  let e = push_loop(e, end_label, parent_continue)
+
+  // Emit discriminant — stays on stack through comparison phase
+  use e <- result.try(emit_expr(e, discriminant))
+
+  // Allocate labels: each non-default case gets a "found" trampoline label
+  // and a "body" label. Default cases only get a "body" label.
+  // The trampoline pops the discriminant then jumps to the body label.
+  // This ensures the discriminant is off the stack for all body code,
+  // allowing fall-through between case bodies to work correctly.
+  let #(e, body_labels) =
+    list.fold(cases, #(e, []), fn(acc, _case) {
+      let #(e, labels) = acc
+      let #(e, label) = fresh_label(e)
+      #(e, list.append(labels, [label]))
+    })
+
+  // Allocate found (trampoline) labels for non-default cases
+  let #(e, found_labels) =
+    list.fold(cases, #(e, []), fn(acc, c) {
+      let #(e, labels) = acc
+      case c {
+        ast.SwitchCase(Some(_), _) -> {
+          let #(e, label) = fresh_label(e)
+          #(e, list.append(labels, [Some(label)]))
+        }
+        ast.SwitchCase(None, _) -> #(e, list.append(labels, [None]))
+      }
+    })
+
+  // Phase 1: Emit comparison jumps
+  // For each case with a test: Dup discriminant, emit test, StrictEq, JumpIfTrue(found_N)
+  let #(e, default_body_label) =
+    list.index_fold(cases, #(e, option.None), fn(acc, c, idx) {
+      let #(e, default_lbl) = acc
+      case c {
+        ast.SwitchCase(Some(test_expr), _) -> {
+          let e = emit_ir(e, IrDup)
+          case emit_expr(e, test_expr) {
+            Ok(e) -> {
+              let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+              let found_lbl = case list.drop(found_labels, idx) {
+                [Some(l), ..] -> l
+                _ -> end_label
+              }
+              let e = emit_ir(e, IrJumpIfTrue(found_lbl))
+              #(e, default_lbl)
+            }
+            Error(_) -> #(e, default_lbl)
+          }
+        }
+        ast.SwitchCase(None, _) -> {
+          // Default case — record its body label
+          let body_lbl = case list.drop(body_labels, idx) {
+            [l, ..] -> Some(l)
+            [] -> Some(end_label)
+          }
+          #(e, body_lbl)
+        }
+      }
+    })
+
+  // No match: pop discriminant and jump to default body or end
+  let e = emit_ir(e, IrPop)
+  let e = case default_body_label {
+    Some(dl) -> emit_ir(e, IrJump(dl))
+    None -> emit_ir(e, IrJump(end_label))
+  }
+
+  // Phase 2: Emit trampolines — each pops discriminant and jumps to body
+  let e =
+    list.index_fold(cases, e, fn(e, _c, idx) {
+      case list.drop(found_labels, idx) {
+        [Some(found_lbl), ..] -> {
+          let e = emit_ir(e, IrLabel(found_lbl))
+          let e = emit_ir(e, IrPop)
+          let body_lbl = case list.drop(body_labels, idx) {
+            [l, ..] -> l
+            [] -> end_label
+          }
+          emit_ir(e, IrJump(body_lbl))
+        }
+        _ -> e
+      }
+    })
+
+  // Phase 3: Emit case bodies (fall-through between them)
+  let e =
+    list.index_fold(cases, e, fn(e, c, idx) {
+      let label = case list.drop(body_labels, idx) {
+        [l, ..] -> l
+        [] -> end_label
+      }
+      let e = emit_ir(e, IrLabel(label))
+      case c {
+        ast.SwitchCase(_, consequent) -> {
+          case list.try_fold(consequent, e, emit_stmt) {
+            Ok(e) -> e
+            Error(_) -> e
+          }
+        }
+      }
+    })
+
+  let e = emit_ir(e, IrLabel(end_label))
+  let e = pop_loop(e)
+  Ok(e)
 }
 
 fn emit_sequence(

@@ -4524,11 +4524,17 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
         P(..advance(p), last_expr_assignable: False),
         ast.UndefinedExpression,
       ))
-    TemplateLiteral ->
-      Ok(#(
-        P(..advance(p), last_expr_assignable: False),
-        ast.TemplateLiteral(quasis: [], expressions: []),
-      ))
+    TemplateLiteral -> {
+      let raw = peek_value(p)
+      case parse_template_raw(p, raw) {
+        Ok(#(quasis, expressions)) ->
+          Ok(#(
+            P(..advance(p), last_expr_assignable: False),
+            ast.TemplateLiteral(quasis:, expressions:),
+          ))
+        Error(e) -> Error(e)
+      }
+    }
     This ->
       Ok(#(P(..advance(p), last_expr_assignable: False), ast.ThisExpression))
     Super -> {
@@ -6555,6 +6561,193 @@ fn skip_to_brace(s: String, pos: Int, end: Int) -> Bool {
         "}" -> check_string_escapes(s, pos + 1, end)
         _ -> skip_to_brace(s, pos + 1, end)
       }
+  }
+}
+
+/// Parse a raw template literal string into quasis and expression ASTs.
+/// The raw string includes backticks, e.g. `hello ${x} world`
+fn parse_template_raw(
+  p: P,
+  raw: String,
+) -> Result(#(List(String), List(ast.Expression)), ParseError) {
+  // Strip leading ` and trailing `
+  let len = string.length(raw)
+  let inner = string.slice(raw, 1, len - 2)
+  // Split into quasis and expression source strings
+  let #(quasis, expr_sources) = split_template_parts(inner)
+  // Parse each expression source
+  use expressions <- result.try(
+    list.try_map(expr_sources, fn(src) {
+      case lexer.tokenize(src) {
+        Error(e) ->
+          Error(LexerError(lexer.lex_error_to_string(e), lexer.lex_error_pos(e)))
+        Ok(tokens) -> {
+          let sub_p =
+            P(
+              ..p,
+              tokens: tokens,
+              last_expr_assignable: False,
+              last_expr_is_assignment: False,
+            )
+          case parse_expression(sub_p) {
+            Ok(#(_, expr)) -> Ok(expr)
+            Error(e) -> Error(e)
+          }
+        }
+      }
+    }),
+  )
+  Ok(#(quasis, expressions))
+}
+
+/// Split template inner text (without backticks) into quasi strings and
+/// expression source strings. Tracks brace depth for nested `{}`.
+fn split_template_parts(inner: String) -> #(List(String), List(String)) {
+  let graphemes = string.to_graphemes(inner)
+  do_split_template(graphemes, "", [], [], 0, False)
+}
+
+fn do_split_template(
+  chars: List(String),
+  current_quasi: String,
+  quasis: List(String),
+  expr_sources: List(String),
+  brace_depth: Int,
+  in_expr: Bool,
+) -> #(List(String), List(String)) {
+  case chars, in_expr {
+    // End of input
+    [], False -> #(
+      list.reverse([current_quasi, ..quasis]),
+      list.reverse(expr_sources),
+    )
+    [], True ->
+      // Unterminated expression (shouldn't happen if lexer is correct)
+      #(list.reverse([current_quasi, ..quasis]), list.reverse(expr_sources))
+    // In quasi mode: look for ${ to start an expression
+    ["\\", next, ..rest], False ->
+      // Escaped character in quasi — include both chars, process escape
+      do_split_template(
+        rest,
+        current_quasi <> process_template_escape(next),
+        quasis,
+        expr_sources,
+        brace_depth,
+        False,
+      )
+    ["$", "{", ..rest], False ->
+      // Start of expression: save current quasi, begin expression collection
+      do_split_template(
+        rest,
+        "",
+        [current_quasi, ..quasis],
+        expr_sources,
+        0,
+        True,
+      )
+    [ch, ..rest], False ->
+      do_split_template(
+        rest,
+        current_quasi <> ch,
+        quasis,
+        expr_sources,
+        brace_depth,
+        False,
+      )
+    // In expression mode: track brace depth, look for closing }
+    ["}", ..rest], True ->
+      case brace_depth {
+        0 ->
+          // End of expression
+          do_split_template(
+            rest,
+            "",
+            quasis,
+            [current_quasi, ..expr_sources],
+            0,
+            False,
+          )
+        _ ->
+          do_split_template(
+            rest,
+            current_quasi <> "}",
+            quasis,
+            expr_sources,
+            brace_depth - 1,
+            True,
+          )
+      }
+    ["{", ..rest], True ->
+      do_split_template(
+        rest,
+        current_quasi <> "{",
+        quasis,
+        expr_sources,
+        brace_depth + 1,
+        True,
+      )
+    // Handle string literals inside expressions (to avoid counting braces in strings)
+    ["\"", ..rest], True -> {
+      let #(str_content, remaining) = collect_string_in_expr(rest, "\"", "\"")
+      do_split_template(
+        remaining,
+        current_quasi <> str_content,
+        quasis,
+        expr_sources,
+        brace_depth,
+        True,
+      )
+    }
+    ["'", ..rest], True -> {
+      let #(str_content, remaining) = collect_string_in_expr(rest, "'", "'")
+      do_split_template(
+        remaining,
+        current_quasi <> str_content,
+        quasis,
+        expr_sources,
+        brace_depth,
+        True,
+      )
+    }
+    [ch, ..rest], True ->
+      do_split_template(
+        rest,
+        current_quasi <> ch,
+        quasis,
+        expr_sources,
+        brace_depth,
+        True,
+      )
+  }
+}
+
+/// Collect characters inside a string literal in a template expression,
+/// preserving escapes and tracking the closing quote.
+fn collect_string_in_expr(
+  chars: List(String),
+  quote: String,
+  acc: String,
+) -> #(String, List(String)) {
+  case chars {
+    [] -> #(acc, [])
+    ["\\", next, ..rest] ->
+      collect_string_in_expr(rest, quote, acc <> "\\" <> next)
+    [ch, ..rest] if ch == quote -> #(acc <> ch, rest)
+    [ch, ..rest] -> collect_string_in_expr(rest, quote, acc <> ch)
+  }
+}
+
+/// Process a single escape sequence in a template quasi.
+fn process_template_escape(ch: String) -> String {
+  case ch {
+    "n" -> "\n"
+    "t" -> "\t"
+    "r" -> "\r"
+    "\\" -> "\\"
+    "`" -> "`"
+    "$" -> "$"
+    "0" -> "\u{0000}"
+    _ -> ch
   }
 }
 

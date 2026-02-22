@@ -1,6 +1,8 @@
 name: test262 conformance
 
 on:
+  push:
+    branches: [master]
   schedule:
     # Run at midday UK time every day
     # UK is UTC+0 in winter, UTC+1 in summer (BST)
@@ -8,6 +10,9 @@ on:
     # Use 12:00 UTC as a reasonable midday approximation
     - cron: '0 12 * * *'
   workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
 
 jobs:
   test262:
@@ -22,9 +27,11 @@ jobs:
       - name: Check for changes since last run
         id: changes
         run: |
-          # Check if there are code changes since the last workflow run
-          # Compare HEAD with the previous commit
-          if git diff --quiet HEAD~1 -- src/ test/ gleam.toml; then
+          # On push events, always run. On schedule/dispatch, check for changes.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Push event, running test262"
+          elif git diff --quiet HEAD~1 -- src/ test/ gleam.toml; then
             echo "changed=false" >> $GITHUB_OUTPUT
             echo "No source changes detected, skipping test262 run"
           else

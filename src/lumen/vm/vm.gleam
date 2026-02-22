@@ -20,9 +20,9 @@ import lumen/vm/opcode.{
   Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, ArrayObject, Finite, FunctionObject, Infinity,
-  JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
-  JsUninitialized, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
+  type JsNum, type JsValue, type Ref, ArrayObject, Finite, FunctionObject,
+  Infinity, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  JsUndefined, JsUninitialized, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 
 // ============================================================================
@@ -133,7 +133,7 @@ pub fn run_with_globals(
       try_stack: [],
       finally_stack: [],
       builtins:,
-      closure_templates: dict.new(),
+      closure_templates: builtins.constructor_templates,
       this_binding: JsUndefined,
     )
   execute(state)
@@ -360,14 +360,35 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     BinOp(kind) -> {
       case state.stack {
         [right, left, ..rest] -> {
-          case exec_binop(kind, left, right) {
-            Ok(result) ->
-              Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
-            Error(msg) -> {
-              let #(heap, err) =
-                object.make_type_error(state.heap, state.builtins, msg)
-              Error(#(Thrown, err, heap))
+          // instanceof needs heap access for prototype chain walking
+          case kind {
+            opcode.InstanceOf -> {
+              case js_instanceof(state.heap, left, right) {
+                Ok(result) ->
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(result), ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                Error(msg) -> {
+                  let #(heap, err) =
+                    object.make_type_error(state.heap, state.builtins, msg)
+                  Error(#(Thrown, err, heap))
+                }
+              }
             }
+            _ ->
+              case exec_binop(kind, left, right) {
+                Ok(result) ->
+                  Ok(State(..state, stack: [result, ..rest], pc: state.pc + 1))
+                Error(msg) -> {
+                  let #(heap, err) =
+                    object.make_type_error(state.heap, state.builtins, msg)
+                  Error(#(Thrown, err, heap))
+                }
+              }
           }
         }
         _ -> Error(#(VmError(StackUnderflow("BinOp")), JsUndefined, state.heap))
@@ -1454,8 +1475,10 @@ fn exec_binop(
     GtEq ->
       compare_values(left, right, fn(ord) { ord == GtOrd || ord == EqOrd })
 
-    // These need runtime object support — defer
-    opcode.In | opcode.InstanceOf -> Error("in/instanceof not yet implemented")
+    // In operator — needs runtime object support
+    opcode.In -> Error("in operator not yet implemented")
+    // InstanceOf handled in BinOp dispatcher (needs heap access)
+    opcode.InstanceOf -> Error("instanceof: unreachable")
   }
 }
 
@@ -1660,7 +1683,7 @@ fn to_js_string(val: JsValue) -> String {
     JsNull -> "null"
     JsBool(True) -> "true"
     JsBool(False) -> "false"
-    JsNumber(Finite(n)) -> float.to_string(n)
+    JsNumber(Finite(n)) -> js_format_number(n)
     JsNumber(NaN) -> "NaN"
     JsNumber(Infinity) -> "Infinity"
     JsNumber(NegInfinity) -> "-Infinity"
@@ -1669,6 +1692,64 @@ fn to_js_string(val: JsValue) -> String {
     JsSymbol(_) -> "Symbol()"
     JsObject(_) -> "[object Object]"
     JsUninitialized -> "undefined"
+  }
+}
+
+/// Format a JS number as a string. Integer-valued floats omit the decimal.
+fn js_format_number(n: Float) -> String {
+  let truncated = float.truncate(n)
+  case int.to_float(truncated) == n {
+    True -> int.to_string(truncated)
+    False -> float.to_string(n)
+  }
+}
+
+/// JS instanceof operator.
+/// Walks the left operand's prototype chain looking for constructor.prototype.
+fn js_instanceof(
+  heap: Heap,
+  left: JsValue,
+  constructor: JsValue,
+) -> Result(Bool, String) {
+  // Right side must be a callable object (function)
+  case constructor {
+    JsObject(ctor_ref) ->
+      case heap.read(heap, ctor_ref) {
+        Ok(ObjectSlot(kind: FunctionObject(..), ..)) -> {
+          // Get the constructor's .prototype property
+          case object.get_property(heap, ctor_ref, "prototype") {
+            Ok(JsObject(proto_ref)) ->
+              // Walk left's prototype chain
+              case left {
+                JsObject(obj_ref) -> instanceof_walk(heap, obj_ref, proto_ref)
+                // Primitives are never instances
+                _ -> Ok(False)
+              }
+            Ok(_) ->
+              Error("Function has non-object prototype in instanceof check")
+            Error(_) -> Ok(False)
+          }
+        }
+        _ -> Error("Right-hand side of instanceof is not callable")
+      }
+    _ -> Error("Right-hand side of instanceof is not callable")
+  }
+}
+
+/// Walk an object's [[Prototype]] chain looking for a target ref.
+fn instanceof_walk(
+  heap: Heap,
+  obj_ref: Ref,
+  target_proto: Ref,
+) -> Result(Bool, String) {
+  case heap.read(heap, obj_ref) {
+    Ok(ObjectSlot(prototype: Some(proto_ref), ..)) ->
+      case proto_ref.id == target_proto.id {
+        True -> Ok(True)
+        False -> instanceof_walk(heap, proto_ref, target_proto)
+      }
+    Ok(ObjectSlot(prototype: None, ..)) -> Ok(False)
+    _ -> Ok(False)
   }
 }
 

@@ -252,7 +252,7 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let globals = make_test262_globals()
+          let globals = make_test262_globals(b)
           case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
@@ -263,29 +263,38 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
 }
 
 /// Pre-populated globals for test262 execution.
-fn make_test262_globals() -> dict.Dict(String, value.JsValue) {
+fn make_test262_globals(
+  b: builtins.Builtins,
+) -> dict.Dict(String, value.JsValue) {
   dict.from_list([
     #("NaN", value.JsNumber(value.NaN)),
     #("Infinity", value.JsNumber(value.Infinity)),
     #("undefined", value.JsUndefined),
+    #("Error", value.JsObject(b.error_constructor)),
+    #("TypeError", value.JsObject(b.type_error_constructor)),
+    #("ReferenceError", value.JsObject(b.reference_error_constructor)),
+    #("RangeError", value.JsObject(b.range_error_constructor)),
+    #("SyntaxError", value.JsObject(b.syntax_error_constructor)),
   ])
 }
 
 /// Prepend harness files to test source.
-/// sta.js is always included (defines Test262Error, $DONOTEVALUATE).
+/// Per test262 spec: assert.js and sta.js are ALWAYS included (unless raw flag).
 /// Additional includes come from the test's metadata.
 fn prepend_harness(metadata: TestMetadata, source: String) -> String {
-  // sta.js is always included unless raw flag
+  // Both assert.js and sta.js are always included unless raw flag
   let is_raw = list.contains(metadata.flags, "raw")
 
   case is_raw {
     True -> source
     False -> {
-      // Build list of harness files: sta.js first, then metadata includes
-      let harness_files = case list.contains(metadata.includes, "sta.js") {
-        True -> metadata.includes
-        False -> ["sta.js", ..metadata.includes]
-      }
+      // Build list: assert.js + sta.js first, then metadata includes
+      // (dedup any that are already in the default set)
+      let default_harness = ["assert.js", "sta.js"]
+      let extra_includes =
+        metadata.includes
+        |> list.filter(fn(f) { !list.contains(default_harness, f) })
+      let harness_files = list.append(default_harness, extra_includes)
 
       // Read and prepend each harness file
       let harness_source =

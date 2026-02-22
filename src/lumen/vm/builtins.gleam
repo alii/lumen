@@ -1,11 +1,14 @@
 import gleam/dict.{type Dict}
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None}
+import lumen/vm/builtins/array as builtins_array
+import lumen/vm/builtins/common
+import lumen/vm/builtins/error as builtins_error
+import lumen/vm/builtins/function as builtins_function
 import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
-  type JsValue, type Ref, JsString, ObjectSlot, OrdinaryObject,
-}
+import lumen/vm/opcode.{type FuncTemplate}
+import lumen/vm/value.{type Ref}
 
-/// Pre-allocated prototype objects for the JS built-in hierarchy.
+/// Pre-allocated prototype objects and constructor functions for JS built-ins.
 /// All refs are rooted so GC never collects them.
 pub type Builtins {
   Builtins(
@@ -17,33 +20,13 @@ pub type Builtins {
     reference_error_prototype: Ref,
     range_error_prototype: Ref,
     syntax_error_prototype: Ref,
+    error_constructor: Ref,
+    type_error_constructor: Ref,
+    reference_error_constructor: Ref,
+    range_error_constructor: Ref,
+    syntax_error_constructor: Ref,
+    constructor_templates: Dict(Int, FuncTemplate),
   )
-}
-
-/// Allocate an ordinary prototype object on the heap, root it, and return
-/// the updated heap + ref. Every builtin prototype follows this pattern.
-fn alloc_proto(
-  h: Heap,
-  prototype: Option(Ref),
-  properties: Dict(String, JsValue),
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: OrdinaryObject,
-        properties:,
-        elements: dict.new(),
-        prototype:,
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Shorthand: alloc a prototype with just a "name" property.
-fn alloc_named_proto(h: Heap, parent: Ref, name: String) -> #(Heap, Ref) {
-  alloc_proto(h, Some(parent), dict.from_list([#("name", JsString(name))]))
 }
 
 /// Allocate and root all built-in prototype objects on the heap.
@@ -60,30 +43,14 @@ fn alloc_named_proto(h: Heap, parent: Ref, name: String) -> #(Heap, Ref) {
 ///   SyntaxError.prototype    → Error.prototype
 pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Object.prototype — the root of all prototype chains
-  let #(h, object_proto) = alloc_proto(h, None, dict.new())
+  let #(h, object_proto) = common.alloc_proto(h, None, dict.new())
 
-  // Core prototypes inheriting from Object.prototype
-  let #(h, function_proto) = alloc_proto(h, Some(object_proto), dict.new())
-  let #(h, array_proto) = alloc_proto(h, Some(object_proto), dict.new())
+  // Core prototypes
+  let #(h, function_proto) = builtins_function.init(h, object_proto)
+  let #(h, array_proto) = builtins_array.init(h, object_proto)
 
-  // Error.prototype — has both "name" and "message"
-  let #(h, error_proto) =
-    alloc_proto(
-      h,
-      Some(object_proto),
-      dict.from_list([
-        #("name", JsString("Error")),
-        #("message", JsString("")),
-      ]),
-    )
-
-  // Error subclass prototypes — each just sets "name", inherits from Error.prototype
-  let #(h, type_error_proto) = alloc_named_proto(h, error_proto, "TypeError")
-  let #(h, reference_error_proto) =
-    alloc_named_proto(h, error_proto, "ReferenceError")
-  let #(h, range_error_proto) = alloc_named_proto(h, error_proto, "RangeError")
-  let #(h, syntax_error_proto) =
-    alloc_named_proto(h, error_proto, "SyntaxError")
+  // Error prototypes + constructors
+  let #(h, errors) = builtins_error.init(h, object_proto, function_proto)
 
   #(
     h,
@@ -91,11 +58,17 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       object_prototype: object_proto,
       function_prototype: function_proto,
       array_prototype: array_proto,
-      error_prototype: error_proto,
-      type_error_prototype: type_error_proto,
-      reference_error_prototype: reference_error_proto,
-      range_error_prototype: range_error_proto,
-      syntax_error_prototype: syntax_error_proto,
+      error_prototype: errors.error_prototype,
+      type_error_prototype: errors.type_error_prototype,
+      reference_error_prototype: errors.reference_error_prototype,
+      range_error_prototype: errors.range_error_prototype,
+      syntax_error_prototype: errors.syntax_error_prototype,
+      error_constructor: errors.error_constructor,
+      type_error_constructor: errors.type_error_constructor,
+      reference_error_constructor: errors.reference_error_constructor,
+      range_error_constructor: errors.range_error_constructor,
+      syntax_error_constructor: errors.syntax_error_constructor,
+      constructor_templates: errors.constructor_templates,
     ),
   )
 }

@@ -750,3 +750,211 @@ pub fn method_call_binds_this_test() {
     99.0,
   )
 }
+
+// ============================================================================
+// Template literals
+// ============================================================================
+
+pub fn template_literal_no_expressions_test() {
+  assert_normal("`hello world`", JsString("hello world"))
+}
+
+pub fn template_literal_with_expression_test() {
+  assert_normal("var x = 42; `value is ${x}`", JsString("value is 42"))
+}
+
+pub fn template_literal_multiple_expressions_test() {
+  assert_normal(
+    "var a = 1; var b = 2; `${a} + ${b} = ${a + b}`",
+    JsString("1 + 2 = 3"),
+  )
+}
+
+pub fn template_literal_empty_test() {
+  assert_normal("``", JsString(""))
+}
+
+// ============================================================================
+// Switch statements
+// ============================================================================
+
+pub fn switch_basic_match_test() {
+  assert_normal_number(
+    "var x = 2; var r = 0;
+     switch (x) {
+       case 1: r = 10; break;
+       case 2: r = 20; break;
+       case 3: r = 30; break;
+     }
+     r",
+    20.0,
+  )
+}
+
+pub fn switch_default_test() {
+  assert_normal_number(
+    "var x = 99; var r = 0;
+     switch (x) {
+       case 1: r = 10; break;
+       default: r = -1; break;
+     }
+     r",
+    -1.0,
+  )
+}
+
+pub fn switch_fallthrough_test() {
+  assert_normal_number(
+    "var x = 1; var r = 0;
+     switch (x) {
+       case 1: r = r + 10;
+       case 2: r = r + 20; break;
+       case 3: r = r + 30; break;
+     }
+     r",
+    30.0,
+  )
+}
+
+pub fn switch_no_match_no_default_test() {
+  assert_normal_number(
+    "var x = 99; var r = 5;
+     switch (x) {
+       case 1: r = 10; break;
+       case 2: r = 20; break;
+     }
+     r",
+    5.0,
+  )
+}
+
+pub fn assert_js_harness_basic_test() {
+  // Minimal sta.js + assert.js + simple assertion
+  assert_normal(
+    "function Test262Error(message) { this.message = message || ''; }
+     Test262Error.prototype.toString = function () { return 'Test262Error: ' + this.message; };
+
+     function assert(mustBeTrue, message) {
+       if (mustBeTrue === true) { return; }
+       throw new Test262Error(message);
+     }
+     assert._isSameValue = function (a, b) {
+       if (a === b) { return a !== 0 || 1 / a === 1 / b; }
+       return a !== a && b !== b;
+     };
+     assert.sameValue = function (actual, expected, message) {
+       try {
+         if (assert._isSameValue(actual, expected)) { return; }
+       } catch (error) {
+         throw new Test262Error('_isSameValue threw');
+       }
+       throw new Test262Error('not same value');
+     };
+
+     assert.sameValue(1 + 1, 2);
+     assert.sameValue(typeof 42, 'number');
+     42",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn full_assert_js_compiles_test() {
+  // Test that real sta.js + assert.js + simple test compiles and runs
+  assert_normal(
+    "function Test262Error(message) {
+       this.message = message || '';
+     }
+     Test262Error.prototype.toString = function () {
+       return 'Test262Error: ' + this.message;
+     };
+     Test262Error.thrower = function (message) {
+       throw new Test262Error(message);
+     };
+     function $DONOTEVALUATE() {
+       throw 'Test262: This statement should not be evaluated.';
+     }
+
+     function assert(mustBeTrue, message) {
+       if (mustBeTrue === true) { return; }
+       if (message === undefined) {
+         message = 'Expected true but got ' + assert._toString(mustBeTrue);
+       }
+       throw new Test262Error(message);
+     }
+     assert._isSameValue = function (a, b) {
+       if (a === b) { return a !== 0 || 1 / a === 1 / b; }
+       return a !== a && b !== b;
+     };
+     assert.sameValue = function (actual, expected, message) {
+       try {
+         if (assert._isSameValue(actual, expected)) { return; }
+       } catch (error) {
+         throw new Test262Error(message + ' (_isSameValue operation threw) ' + error);
+       }
+       if (message === undefined) { message = ''; } else { message += ' '; }
+       message += 'Expected SameValue';
+       throw new Test262Error(message);
+     };
+     assert.notSameValue = function (actual, unexpected, message) {
+       if (!assert._isSameValue(actual, unexpected)) { return; }
+       if (message === undefined) { message = ''; } else { message += ' '; }
+       message += 'Expected not SameValue';
+       throw new Test262Error(message);
+     };
+     assert.throws = function (expectedErrorConstructor, func, message) {
+       if (typeof func !== 'function') {
+         throw new Test262Error('assert.throws requires a function');
+       }
+       if (message === undefined) { message = ''; } else { message += ' '; }
+       try { func(); } catch (thrown) {
+         if (typeof thrown !== 'object' || thrown === null) {
+           throw new Test262Error(message + 'Thrown value was not an object!');
+         } else if (thrown.constructor !== expectedErrorConstructor) {
+           throw new Test262Error(message + 'Wrong error constructor');
+         }
+         return;
+       }
+       throw new Test262Error(message + 'No exception thrown');
+     };
+     function isPrimitive(value) {
+       return !value || (typeof value !== 'object' && typeof value !== 'function');
+     }
+     assert._formatIdentityFreeValue = function (value) {
+       switch (value === null ? 'null' : typeof value) {
+         case 'string': return '\"' + value + '\"';
+         case 'number':
+           if (value === 0 && 1 / value === -Infinity) return '-0';
+         case 'boolean':
+         case 'undefined':
+         case 'null':
+           return '' + value;
+       }
+     };
+     assert._toString = function (value) {
+       var basic = assert._formatIdentityFreeValue(value);
+       if (basic) return basic;
+       return '' + value;
+     };
+
+     assert.sameValue(typeof true, 'boolean');
+     assert.sameValue(typeof false, 'boolean');
+     assert.sameValue(1 + 1, 2);
+     assert.sameValue(typeof 42, 'number');
+     assert.sameValue(typeof undefined, 'undefined');
+     42",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn switch_string_cases_test() {
+  assert_normal(
+    "var t = 'number'; var r = '';
+     switch (typeof t) {
+       case 'string': r = 'is string'; break;
+       case 'number': r = 'is number'; break;
+       default: r = 'other';
+     }
+     r",
+    JsString("is string"),
+  )
+}
