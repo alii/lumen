@@ -12,10 +12,11 @@ import lumen/vm/object
 import lumen/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, BinOp,
   BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq, Exp, GetField,
-  GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfTrue, LogicalNot, Lt, LtEq, Mod,
-  Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutField, PutLocal,
-  Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub, Swap, UShiftRight,
-  UnaryOp, Void,
+  GetGlobal, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
+  LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst,
+  PushTry, PutField, PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight,
+  StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp,
+  Void,
 }
 import lumen/vm/value.{
   type JsNum, type JsValue, Finite, Infinity, JsBigInt, JsBool, JsFunction,
@@ -55,6 +56,7 @@ type State {
     stack: List(JsValue),
     locals: List(JsValue),
     constants: List(JsValue),
+    globals: dict.Dict(String, JsValue),
     code: List(Op),
     heap: Heap,
     pc: Int,
@@ -87,6 +89,7 @@ pub fn run(
       stack: [],
       locals:,
       constants: func.constants,
+      globals: dict.new(),
       code: func.bytecode,
       heap:,
       pc: 0,
@@ -248,6 +251,68 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       }
     }
 
+    GetGlobal(name) -> {
+      case dict.get(state.globals, name) {
+        Ok(value) ->
+          Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
+        Error(_) ->
+          Ok(
+            State(
+              ..state,
+              stack: [JsUndefined, ..state.stack],
+              pc: state.pc + 1,
+            ),
+          )
+      }
+    }
+
+    PutGlobal(name) -> {
+      case state.stack {
+        [value, ..rest] ->
+          Ok(
+            State(
+              ..state,
+              stack: rest,
+              globals: dict.insert(state.globals, name, value),
+              pc: state.pc + 1,
+            ),
+          )
+        [] ->
+          Error(#(VmErr(StackUnderflow("PutGlobal")), JsUndefined, state.heap))
+      }
+    }
+
+    TypeOf -> {
+      case state.stack {
+        [value, ..rest] -> {
+          let type_str = typeof_value(value)
+          Ok(
+            State(
+              ..state,
+              stack: [JsString(type_str), ..rest],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        [] -> Error(#(VmErr(StackUnderflow("TypeOf")), JsUndefined, state.heap))
+      }
+    }
+
+    TypeofGlobal(name) -> {
+      let value = case dict.get(state.globals, name) {
+        Ok(v) -> v
+        Error(_) -> JsUndefined
+      }
+      let type_str = typeof_value(value)
+      Ok(
+        State(
+          ..state,
+          stack: [JsString(type_str), ..state.stack],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+
     BinOp(kind) -> {
       case state.stack {
         [right, left, ..rest] -> {
@@ -315,6 +380,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         }
         [] ->
           Error(#(VmErr(StackUnderflow("JumpIfTrue")), JsUndefined, state.heap))
+      }
+    }
+
+    JumpIfNullish(target) -> {
+      case state.stack {
+        [value, ..rest] -> {
+          case value {
+            JsNull | JsUndefined -> Ok(State(..state, stack: rest, pc: target))
+            _ -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+          }
+        }
+        [] ->
+          Error(#(
+            VmErr(StackUnderflow("JumpIfNullish")),
+            JsUndefined,
+            state.heap,
+          ))
       }
     }
 
@@ -471,6 +553,20 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 // ============================================================================
 // JS type coercion and operators
 // ============================================================================
+
+fn typeof_value(value: JsValue) -> String {
+  case value {
+    JsUndefined | JsUninitialized -> "undefined"
+    JsNull -> "object"
+    JsBool(_) -> "boolean"
+    JsNumber(_) -> "number"
+    JsString(_) -> "string"
+    JsBigInt(_) -> "bigint"
+    JsSymbol(_) -> "symbol"
+    JsFunction(_) -> "function"
+    JsObject(_) -> "object"
+  }
+}
 
 /// JS ToBoolean: https://tc39.es/ecma262/#sec-toboolean
 fn is_truthy(value: JsValue) -> Bool {

@@ -148,6 +148,13 @@ pub type IrOp {
   IrJumpIfNullish(label: Int)
   IrPushTry(catch_label: Int, finally_label: Int)
 
+  // -- Resolved variable access (emitted by Phase 2) --
+  IrGetLocal(index: Int)
+  IrPutLocal(index: Int)
+  IrGetGlobal(name: String)
+  IrPutGlobal(name: String)
+  IrTypeofGlobal(name: String)
+
   // -- Everything else is the same as final Op --
   IrPushConst(index: Int)
   IrPop

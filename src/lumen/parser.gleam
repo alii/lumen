@@ -603,10 +603,6 @@ fn expr_p(
   result.map(res, fn(pair) { pair.0 })
 }
 
-fn pat_p(res: Result(#(P, ast.Pattern), ParseError)) -> Result(P, ParseError) {
-  result.map(res, fn(pair) { pair.0 })
-}
-
 /// Convert a declaration statement to an expression for export default.
 /// FunctionDeclaration -> FunctionExpression, ClassDeclaration -> ClassExpression.
 fn statement_to_default_export_expr(stmt: ast.Statement) -> ast.Expression {
@@ -950,7 +946,9 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
       )
     False -> P(..p2, binding_kind: BindingVar)
   }
-  use p3 <- result.try(parse_variable_declarator_list(p2, kind))
+  use #(p3, declarations) <- result.try(
+    parse_variable_declarator_list(p2, kind, []),
+  )
   use p4 <- result.try(eat_semicolon(
     P(
       ..p3,
@@ -965,28 +963,37 @@ fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
     Const -> ast.Const
     _ -> ast.Var
   }
-  Ok(#(p4, ast.VariableDeclaration(kind: ast_kind, declarations: [])))
+  Ok(#(p4, ast.VariableDeclaration(kind: ast_kind, declarations:)))
 }
 
 fn parse_variable_declarator_list(
   p: P,
   kind: TokenKind,
-) -> Result(P, ParseError) {
-  use p2 <- result.try(parse_variable_declarator(p, kind))
+  acc: List(ast.VariableDeclarator),
+) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
+  use #(p2, decl) <- result.try(parse_variable_declarator(p, kind))
   case peek(p2) {
-    Comma -> parse_variable_declarator_list(advance(p2), kind)
-    _ -> Ok(p2)
+    Comma -> parse_variable_declarator_list(advance(p2), kind, [decl, ..acc])
+    _ -> Ok(#(p2, list.reverse([decl, ..acc])))
   }
 }
 
-fn parse_variable_declarator(p: P, kind: TokenKind) -> Result(P, ParseError) {
+fn parse_variable_declarator(
+  p: P,
+  kind: TokenKind,
+) -> Result(#(P, ast.VariableDeclarator), ParseError) {
   let is_destructuring = case peek(p) {
     LeftBracket | LeftBrace -> True
     _ -> False
   }
-  use p2 <- result.try(pat_p(parse_binding_pattern(p)))
+  use #(p2, pattern) <- result.try(parse_binding_pattern(p))
   case peek(p2) {
-    Equal -> expr_p(parse_assignment_expression(advance(p2)))
+    Equal -> {
+      use #(p3, init_expr) <- result.try(
+        parse_assignment_expression(advance(p2)),
+      )
+      Ok(#(p3, ast.VariableDeclarator(id: pattern, init: Some(init_expr))))
+    }
     _ -> {
       use <- bool.guard(
         kind == Const,
@@ -996,7 +1003,7 @@ fn parse_variable_declarator(p: P, kind: TokenKind) -> Result(P, ParseError) {
         is_destructuring,
         Error(DestructuringMissingInitializer(pos_of(p2))),
       )
-      Ok(p2)
+      Ok(#(p2, ast.VariableDeclarator(id: pattern, init: None)))
     }
   }
 }
@@ -1694,14 +1701,18 @@ fn parse_for_declaration(
     Const -> ast.Const
     _ -> ast.Var
   }
-  let decl =
-    ast.ForInitDeclaration(
-      ast.VariableDeclaration(kind: var_kind, declarations: []),
-    )
   let pre_scope_var = p2.scope_var
-  use p3 <- result.try(parse_for_binding_or_declarator(p2))
+  use #(p3, pattern) <- result.try(parse_for_binding_or_declarator(p2))
   case peek(p3) {
-    In -> parse_for_in_rest(p3, decl)
+    In -> {
+      let decl =
+        ast.ForInitDeclaration(
+          ast.VariableDeclaration(kind: var_kind, declarations: [
+            ast.VariableDeclarator(id: pattern, init: None),
+          ]),
+        )
+      parse_for_in_rest(p3, decl)
+    }
     Of -> {
       // B.3.4: for-of var bindings must not shadow catch parameters
       use _ <- result.try(case kind {
@@ -1714,6 +1725,12 @@ fn parse_for_declaration(
           )
         _ -> Ok(Nil)
       })
+      let decl =
+        ast.ForInitDeclaration(
+          ast.VariableDeclaration(kind: var_kind, declarations: [
+            ast.VariableDeclarator(id: pattern, init: None),
+          ]),
+        )
       parse_for_of_rest(p3, decl, is_await)
     }
     Semicolon ->
@@ -1723,7 +1740,15 @@ fn parse_for_declaration(
           case is_destr {
             True -> Error(DestructuringMissingInitializer(pos_of(p3)))
             False -> {
-              let p4 = parse_remaining_declarators(p3, kind)
+              let first = ast.VariableDeclarator(id: pattern, init: None)
+              let #(p4, rest) = parse_remaining_declarators(p3, kind, [])
+              let decl =
+                ast.ForInitDeclaration(
+                  ast.VariableDeclaration(kind: var_kind, declarations: [
+                    first,
+                    ..rest
+                  ]),
+                )
               parse_for_classic_rest(advance(p4), Some(decl))
             }
           }
@@ -1735,7 +1760,15 @@ fn parse_for_declaration(
           case is_destr {
             True -> Error(DestructuringMissingInitializer(pos_of(p3)))
             False -> {
-              let p4 = parse_remaining_declarators(p3, kind)
+              let first = ast.VariableDeclarator(id: pattern, init: None)
+              let #(p4, rest) = parse_remaining_declarators(p3, kind, [])
+              let decl =
+                ast.ForInitDeclaration(
+                  ast.VariableDeclaration(kind: var_kind, declarations: [
+                    first,
+                    ..rest
+                  ]),
+                )
               use p5 <- result.try(expect(p4, Semicolon))
               parse_for_classic_rest(p5, Some(decl))
             }
@@ -1746,18 +1779,35 @@ fn parse_for_declaration(
       // Disable 'in' as binary op in initializer so for(var x = a in b)
       // is for-in, not a binary expression
       let p4_no_in = P(..p4, allow_in: False)
-      use p5 <- result.try(expr_p(parse_assignment_expression(p4_no_in)))
+      use #(p5, init_expr) <- result.try(parse_assignment_expression(p4_no_in))
+      let p5 = P(..p5, allow_in: p.allow_in)
       case peek(p5) {
         In ->
           // for-in with initializer: always forbidden
           Error(ForInInitializer(pos_of(p5)))
         Of -> Error(ForOfInitializer(pos_of(p5)))
         Semicolon -> {
-          let p6 = parse_remaining_declarators(p5, kind)
+          let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
+          let #(p6, rest) = parse_remaining_declarators(p5, kind, [])
+          let decl =
+            ast.ForInitDeclaration(
+              ast.VariableDeclaration(kind: var_kind, declarations: [
+                first,
+                ..rest
+              ]),
+            )
           parse_for_classic_rest(advance(p6), Some(decl))
         }
         Comma -> {
-          let p6 = parse_remaining_declarators(p5, kind)
+          let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
+          let #(p6, rest) = parse_remaining_declarators(p5, kind, [])
+          let decl =
+            ast.ForInitDeclaration(
+              ast.VariableDeclaration(kind: var_kind, declarations: [
+                first,
+                ..rest
+              ]),
+            )
           use p7 <- result.try(expect(p6, Semicolon))
           parse_for_classic_rest(p7, Some(decl))
         }
@@ -1825,20 +1875,26 @@ fn parse_for_expression(
   }
 }
 
-fn parse_for_binding_or_declarator(p: P) -> Result(P, ParseError) {
-  pat_p(parse_binding_pattern(p))
+fn parse_for_binding_or_declarator(
+  p: P,
+) -> Result(#(P, ast.Pattern), ParseError) {
+  parse_binding_pattern(p)
 }
 
-fn parse_remaining_declarators(p: P, kind: TokenKind) -> P {
+fn parse_remaining_declarators(
+  p: P,
+  kind: TokenKind,
+  acc: List(ast.VariableDeclarator),
+) -> #(P, List(ast.VariableDeclarator)) {
   case peek(p) {
     Comma -> {
       let p2 = advance(p)
       case parse_variable_declarator(p2, kind) {
-        Ok(p3) -> parse_remaining_declarators(p3, kind)
-        Error(_) -> p
+        Ok(#(p3, decl)) -> parse_remaining_declarators(p3, kind, [decl, ..acc])
+        Error(_) -> #(p, list.reverse(acc))
       }
     }
-    _ -> p
+    _ -> #(p, list.reverse(acc))
   }
 }
 
@@ -2046,7 +2102,7 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
               )
             case
               {
-                use p6 <- result.try(pat_p(parse_binding_pattern(p5)))
+                use #(p6, catch_param) <- result.try(parse_binding_pattern(p5))
                 use p7 <- result.try(expect(
                   P(..p6, binding_kind: BindingNone, in_formal_params: False),
                   RightParen,
@@ -2066,7 +2122,7 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
                       in_block: p.in_block,
                     ),
                     option.Some(ast.CatchClause(
-                      param: option.None,
+                      param: option.Some(catch_param),
                       body: catch_body,
                     )),
                   )
@@ -2852,7 +2908,7 @@ fn parse_class_element(
           }
         KString ->
           case peek_value(p5) {
-            "\"constructor\"" | "'constructor'" -> True
+            "constructor" -> True
             _ -> False
           }
         _ -> False
@@ -2903,7 +2959,7 @@ fn parse_class_element(
               }
             KString ->
               case peek_value(p5) {
-                "\"prototype\"" | "'prototype'" -> True
+                "prototype" -> True
                 _ -> False
               }
             _ -> False
@@ -4746,7 +4802,7 @@ fn is_proto_property(p: P) -> Bool {
     KString -> {
       let val = peek_value(p)
       case val {
-        "\"__proto__\"" | "'__proto__'" ->
+        "__proto__" ->
           case peek_at(p, 1) {
             Colon -> True
             _ -> False
@@ -5708,8 +5764,7 @@ fn expect_from_module_specifier(
   use p2 <- result.try(expect(p, From))
   case peek(p2) {
     KString -> {
-      let raw = peek_value(p2)
-      let value = string.slice(raw, 1, string.length(raw) - 2)
+      let value = peek_value(p2)
       use p3 <- result.try(eat_semicolon(advance(p2)))
       Ok(#(p3, ast.StringLit(value:)))
     }
@@ -5722,8 +5777,7 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   case peek(p2) {
     KString -> {
       // import "module"
-      let raw = peek_value(p2)
-      let value = string.slice(raw, 1, string.length(raw) - 2)
+      let value = peek_value(p2)
       use p3 <- result.try(eat_semicolon(advance(p2)))
       Ok(#(
         p3,
@@ -5845,12 +5899,7 @@ fn parse_import_specifier(p: P) -> Result(#(P, ast.ImportSpecifier), ParseError)
     True -> {
       let original_name = peek_value(p)
       let original_kind = peek(p)
-      // Strip quotes if original is a string literal
-      let imported_name = case original_kind {
-        KString ->
-          string.slice(original_name, 1, string.length(original_name) - 2)
-        _ -> original_name
-      }
+      let imported_name = original_name
       let p2 = advance(p)
       case peek(p2) {
         As -> {
@@ -6054,13 +6103,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
         As -> {
           // export * as name from "module"
           let p4 = advance(p3)
-          let export_name = peek_value(p4)
-          // Strip quotes for string literal exported names
-          let exported_value = case peek(p4) {
-            KString ->
-              string.slice(export_name, 1, string.length(export_name) - 2)
-            _ -> export_name
-          }
+          let exported_value = peek_value(p4)
           let p5 = case peek(p4) {
             Identifier -> advance(p4)
             KString -> advance(p4)
@@ -6070,12 +6113,11 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
                 False -> p4
               }
           }
-          use p5b <- result.try(check_duplicate_export(p5, export_name))
+          use p5b <- result.try(check_duplicate_export(p5, exported_value))
           use p6 <- result.try(expect(p5b, From))
           case peek(p6) {
             KString -> {
-              let raw = peek_value(p6)
-              let value = string.slice(raw, 1, string.length(raw) - 2)
+              let value = peek_value(p6)
               use p7 <- result.try(eat_semicolon(advance(p6)))
               Ok(#(
                 p7,
@@ -6092,8 +6134,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           let p4 = advance(p3)
           case peek(p4) {
             KString -> {
-              let raw = peek_value(p4)
-              let value = string.slice(raw, 1, string.length(raw) - 2)
+              let value = peek_value(p4)
               use p5 <- result.try(eat_semicolon(advance(p4)))
               Ok(#(
                 p5,
@@ -6122,8 +6163,7 @@ fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
           let p5 = advance(p4)
           case peek(p5) {
             KString -> {
-              let raw = peek_value(p5)
-              let value = string.slice(raw, 1, string.length(raw) - 2)
+              let value = peek_value(p5)
               use p6 <- result.try(eat_semicolon(advance(p5)))
               Ok(#(
                 p6,
@@ -6184,12 +6224,7 @@ fn parse_export_specifier(p: P) -> Result(#(P, ast.ExportSpecifier), ParseError)
   case is_specifier_name {
     False -> Error(ExpectedExportSpecifierName(pos_of(p)))
     True -> {
-      let local_name = peek_value(p)
-      // Strip quotes for string literal specifier names
-      let local_value = case peek(p) {
-        KString -> string.slice(local_name, 1, string.length(local_name) - 2)
-        _ -> local_name
-      }
+      let local_value = peek_value(p)
       let p2 = advance(p)
       case peek(p2) {
         As -> {
@@ -6201,17 +6236,12 @@ fn parse_export_specifier(p: P) -> Result(#(P, ast.ExportSpecifier), ParseError)
           case is_alias_name {
             True -> {
               let export_name = peek_value(p3)
-              // Strip quotes for string literal alias names
-              let exported_value = case peek(p3) {
-                KString ->
-                  string.slice(export_name, 1, string.length(export_name) - 2)
-                _ -> export_name
-              }
+              let exported_value = export_name
               use p4 <- result.try(check_duplicate_export(p3, export_name))
               // Track local name for undeclared-export validation
               let p4 =
                 P(..p4, export_local_refs: [
-                  #(local_name, pos_of(p)),
+                  #(local_value, pos_of(p)),
                   ..p4.export_local_refs
                 ])
               Ok(#(
@@ -6227,11 +6257,11 @@ fn parse_export_specifier(p: P) -> Result(#(P, ast.ExportSpecifier), ParseError)
         }
         _ -> {
           // No alias: the local name IS the export name
-          use p2b <- result.try(check_duplicate_export(p, local_name))
+          use p2b <- result.try(check_duplicate_export(p, local_value))
           // Track local name for undeclared-export validation
           Ok(#(
             P(..p2, export_names: p2b.export_names, export_local_refs: [
-              #(local_name, pos_of(p)),
+              #(local_value, pos_of(p)),
               ..p2b.export_local_refs
             ]),
             ast.ExportSpecifier(local: local_value, exported: local_value),
@@ -6277,7 +6307,7 @@ fn scan_directive_prologue(
     KString -> {
       let val = peek_value_at(p, offset)
       case val {
-        "\"use strict\"" | "'use strict'" -> {
+        "use strict" -> {
           use _ <- result.try(check_retroactive_octals(p, seen_strings))
           let p = P(..p, strict: True)
           check_retroactive_params(p)
@@ -6483,7 +6513,7 @@ fn is_legacy_octal_number(value: String) -> Bool {
 
 /// Check if a string literal value contains legacy octal escapes (\0-\7 followed by more)
 fn has_legacy_octal_escape(value: String) -> Bool {
-  check_string_escapes(value, 1, string.length(value) - 1)
+  check_string_escapes(value, 0, string.length(value))
 }
 
 fn check_string_escapes(s: String, pos: Int, end: Int) -> Bool {

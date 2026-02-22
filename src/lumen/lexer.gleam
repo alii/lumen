@@ -850,8 +850,10 @@ fn read_string_body(
     _ ->
       case ch == quote {
         True -> {
-          let len = pos - start + 1
-          Ok(tokn(KString, byte_slice(bytes, start, len), start, len))
+          let raw_len = pos - start + 1
+          // Store the string content without quotes as the token value
+          let content = byte_slice(bytes, start + 1, raw_len - 2)
+          Ok(tokn(KString, content, start, raw_len))
         }
         False ->
           read_string_body(bytes, pos + char_width_at(bytes, pos), start, quote)
