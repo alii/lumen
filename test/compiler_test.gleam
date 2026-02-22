@@ -1,3 +1,4 @@
+import gleam/int
 import gleam/string
 import lumen/compiler
 import lumen/parser
@@ -36,16 +37,13 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
 
 fn inspect_vm_error(err: vm.VmError) -> String {
   case err {
-    vm.PcOutOfBounds(pc) -> "PcOutOfBounds(" <> int_to_string(pc) <> ")"
+    vm.PcOutOfBounds(pc) -> "PcOutOfBounds(" <> pc |> int.to_string <> ")"
     vm.StackUnderflow(op) -> "StackUnderflow(" <> op <> ")"
     vm.LocalIndexOutOfBounds(i) ->
-      "LocalIndexOutOfBounds(" <> int_to_string(i) <> ")"
+      "LocalIndexOutOfBounds(" <> i |> int.to_string <> ")"
     vm.Unimplemented(op) -> "Unimplemented(" <> op <> ")"
   }
 }
-
-@external(erlang, "erlang", "integer_to_list")
-fn int_to_string(n: Int) -> String
 
 fn assert_normal(source: String, expected: value.JsValue) {
   case run_js(source) {
@@ -426,5 +424,98 @@ pub fn function_recursion_test() {
   assert_normal_number(
     "function fact(n) { if (n <= 1) return 1; return n * fact(n - 1); } fact(5)",
     120.0,
+  )
+}
+
+// ============================================================================
+// Arrow function tests
+// ============================================================================
+
+pub fn arrow_expression_body_test() {
+  assert_normal_number("var f = (x) => x + 1; f(5)", 6.0)
+}
+
+pub fn arrow_two_params_test() {
+  assert_normal_number("var f = (a, b) => a + b; f(3, 4)", 7.0)
+}
+
+pub fn arrow_block_body_test() {
+  assert_normal_number("var f = (x) => { return x * 2; }; f(5)", 10.0)
+}
+
+pub fn arrow_no_params_test() {
+  assert_normal_number("var f = () => 42; f()", 42.0)
+}
+
+pub fn arrow_nested_expression_test() {
+  assert_normal_number("var f = (x) => x * x + 1; f(3)", 10.0)
+}
+
+// ============================================================================
+// Closure tests
+// ============================================================================
+
+pub fn closure_basic_test() {
+  assert_normal_number(
+    "function make() { var x = 10; function inner() { return x; } return inner; } make()()",
+    10.0,
+  )
+}
+
+pub fn closure_param_capture_test() {
+  assert_normal_number(
+    "function adder(n) { return function(x) { return x + n; }; } adder(5)(3)",
+    8.0,
+  )
+}
+
+pub fn closure_two_params_test() {
+  assert_normal_number(
+    "function f(a, b) { return function() { return a + b; }; } f(3, 4)()",
+    7.0,
+  )
+}
+
+pub fn closure_arrow_test() {
+  assert_normal_number("function f(x) { return () => x; } f(42)()", 42.0)
+}
+
+pub fn closure_let_test() {
+  assert_normal_number(
+    "function f() { let x = 99; return function() { return x; }; } f()()",
+    99.0,
+  )
+}
+
+pub fn closure_multiple_captures_test() {
+  assert_normal_number(
+    "function f(a, b, c) { return function() { return a + b + c; }; } f(1, 2, 3)()",
+    6.0,
+  )
+}
+
+pub fn closure_factory_test() {
+  assert_normal_number(
+    "function multiplier(factor) { return function(x) { return x * factor; }; } var double = multiplier(2); double(7)",
+    14.0,
+  )
+}
+
+pub fn closure_arrow_expression_capture_test() {
+  assert_normal_number("function f(x) { return (y) => x + y; } f(10)(20)", 30.0)
+}
+
+pub fn closure_var_capture_test() {
+  assert_normal_number(
+    "function f() { var x = 5; var g = function() { return x; }; x = 10; return g; } f()()",
+    5.0,
+  )
+}
+
+pub fn closure_independent_copies_test() {
+  // Two closures from same factory get independent copies
+  assert_normal_number(
+    "function make(n) { return function() { return n; }; } var a = make(1); var b = make(2); a() + b()",
+    3.0,
   )
 }
