@@ -1,3 +1,19 @@
+# Lumen — JavaScript Runtime Prior Art
+
+**CRITICAL**: When implementing any JavaScript runtime feature, you MUST study prior art from existing JS engines before writing code. There is an enormous amount of prior work to learn from:
+
+- **QuickJS** (bellard/quickjs) — Best first reference. Small, complete, single-file C implementation. Easy to read and understand. Start here.
+- **V8** (Google) — Production-grade, highly optimized. Good for understanding edge cases and spec compliance.
+- **JavaScriptCore** (WebKit/Apple) — Another production engine. Good for cross-referencing.
+- **engine262** — JS engine written in JS, directly maps to the ECMAScript spec. Excellent for understanding spec semantics.
+- **test262** — The conformance test suite itself often reveals edge cases you wouldn't think of.
+
+**How to research**: Use WebFetch/WebSearch to read the actual source code on GitHub. For QuickJS, the main file is `quickjs.c`. Search for the feature you're implementing (e.g. `JS_CallConstructor`, `js_call_c_function`, `this_val`). Read the ECMAScript spec sections referenced in the code. Cross-reference with engine262 for a more readable spec-aligned implementation.
+
+**Do NOT just implement from memory or vibes.** JS semantics are full of subtle edge cases (e.g. `this` in arrow functions vs regular functions, `new.target`, constructor return value semantics). Get it right by reading how others do it.
+
+---
+
 # Writing Gleam Code
 
 - Never assume functions exist in Gleam stdlib/library code. Gleam is a newer language and likely underrepresented in training data.
