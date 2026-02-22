@@ -28,12 +28,9 @@ pub fn test262_test_() -> test_runner.EunitTests {
       case test_runner.get_env("TEST262") {
         Ok(_) -> {
           let snapshot = test262_snapshot.load_snapshot(snapshot_path)
-          test_runner.generate_recursive_file_tests(
-            test_dir,
-            fn(path, source) {
-              run_test_with_snapshot(snapshot, path, source)
-            },
-          )
+          test_runner.generate_recursive_file_tests(test_dir, fn(path, source) {
+            run_test_with_snapshot(snapshot, path, source)
+          })
         }
         Error(_) -> test_runner.empty_tests()
       }
@@ -52,9 +49,7 @@ fn run_test_with_snapshot(
   case in_snapshot, test_result {
     True, Error(_) -> Ok(Nil)
     True, Ok(_) ->
-      Error(
-        "UNEXPECTED PASS: " <> path <> " now passes; remove from snapshot",
-      )
+      Error("UNEXPECTED PASS: " <> path <> " now passes; remove from snapshot")
     False, Ok(_) -> Ok(Nil)
     False, Error(reason) -> Error(reason)
   }
@@ -71,8 +66,7 @@ pub fn generate_snapshot_test() {
       let js_files =
         all_files
         |> list.filter(fn(path) {
-          string.ends_with(path, ".js")
-          && !string.contains(path, "_FIXTURE")
+          string.ends_with(path, ".js") && !string.contains(path, "_FIXTURE")
         })
         |> list.sort(string.compare)
 
@@ -121,10 +115,7 @@ pub fn generate_snapshot_test() {
 
 // --- Parse test logic ---
 
-fn run_parse_test(
-  metadata: TestMetadata,
-  source: String,
-) -> Result(Nil, String) {
+fn run_parse_test(metadata: TestMetadata, source: String) -> Result(Nil, String) {
   let mode = case list.contains(metadata.flags, "module") {
     True -> parser.Module
     False -> parser.Script

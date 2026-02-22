@@ -23,7 +23,10 @@ pub fn load_snapshot(path: String) -> Set(String) {
 
 /// Write a snapshot file from a list of failing paths.
 /// Paths are sorted alphabetically.
-pub fn write_snapshot(path: String, failures: List(String)) -> Result(Nil, String) {
+pub fn write_snapshot(
+  path: String,
+  failures: List(String),
+) -> Result(Nil, String) {
   let sorted = list.sort(failures, string.compare)
   let contents =
     "# test262 expected failures snapshot\n# Auto-generated. One relative path per line.\n"

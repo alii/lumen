@@ -11,17 +11,17 @@ import lumen/vm/heap.{type Heap}
 import lumen/vm/object
 import lumen/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, BinOp,
-  BitAnd, BitNot, BitOr, BitXor, DefineField, Div, Dup, Eq, Exp, GetField,
+  BitAnd, BitNot, BitOr, BitXor, Call, DefineField, Div, Dup, Eq, Exp, GetField,
   GetGlobal, GetLocal, Gt, GtEq, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue,
-  LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst,
-  PushTry, PutField, PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight,
-  StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp,
-  Void,
+  LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos,
+  PushConst, PushTry, PutField, PutGlobal, PutLocal, Return, ShiftLeft,
+  ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
+  UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, Finite, Infinity, JsBigInt, JsBool, JsFunction,
-  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
-  NaN, NegInfinity, ObjectSlot,
+  type JsNum, type JsValue, type Ref, ClosureSlot, Finite, Infinity, JsBigInt,
+  JsBool, JsFunction, JsNull, JsNumber, JsObject, JsString, JsSymbol,
+  JsUndefined, JsUninitialized, NaN, NegInfinity, ObjectSlot,
 }
 
 // ============================================================================

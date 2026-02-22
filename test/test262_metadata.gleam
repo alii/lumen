@@ -72,10 +72,7 @@ fn parse_yaml_lines(
                   TestMetadata(..meta, negative_phase: phase)
                 }
                 Ok(#("type", value)) ->
-                  TestMetadata(
-                    ..meta,
-                    negative_type: Some(string.trim(value)),
-                  )
+                  TestMetadata(..meta, negative_type: Some(string.trim(value)))
                 _ -> meta
               }
               parse_yaml_lines(rest, meta, True)
@@ -88,7 +85,8 @@ fn parse_yaml_lines(
                 True -> parse_yaml_lines(rest, meta, True)
                 False -> {
                   let meta = case string.starts_with(trimmed, "flags:") {
-                    True -> TestMetadata(..meta, flags: parse_inline_array(trimmed))
+                    True ->
+                      TestMetadata(..meta, flags: parse_inline_array(trimmed))
                     False -> meta
                   }
                   parse_yaml_lines(rest, meta, False)
