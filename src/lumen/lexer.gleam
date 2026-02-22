@@ -1,6 +1,6 @@
 /// JavaScript lexer for Lumen.
 /// Converts source text into a stream of tokens.
-/// Operates on raw bytes (UTF-8) for performance.
+/// Operates on raw bytes (UTF-8) for O(1) character access.
 import gleam/bit_array
 import gleam/int
 import gleam/list
@@ -205,33 +205,41 @@ pub type LexMode {
 }
 
 pub fn tokenize(source: String) -> Result(List(Token), LexError) {
-  do_tokenize(source, 0, 1, [], LexScript)
+  let bytes = bit_array.from_string(source)
+  do_tokenize(bytes, 0, 1, [], LexScript)
 }
 
 pub fn tokenize_module(source: String) -> Result(List(Token), LexError) {
-  do_tokenize(source, 0, 1, [], LexModule)
+  let bytes = bit_array.from_string(source)
+  do_tokenize(bytes, 0, 1, [], LexModule)
 }
 
 fn do_tokenize(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   line: Int,
   acc: List(Token),
   mode: LexMode,
 ) -> Result(List(Token), LexError) {
-  case skip_whitespace_and_comments(src, pos, mode) {
+  case skip_whitespace_and_comments(bytes, pos, mode) {
     Ok(#(new_pos, ws_newlines)) -> {
       let token_line = line + ws_newlines
-      case char_at(src, new_pos) {
+      case char_at(bytes, new_pos) {
         "" -> Ok(list.reverse([Token(Eof, "", new_pos, token_line, 0), ..acc]))
         _ ->
-          case read_token(src, new_pos) {
+          case read_token(bytes, new_pos) {
             Ok(token) -> {
               let token = Token(..token, line: token_line)
               let end_pos = token.pos + token.raw_len
-              let raw_value = slice(src, token.pos, token.raw_len)
-              let end_line = token_line + count_newlines_in(raw_value)
-              do_tokenize(src, end_pos, end_line, [token, ..acc], mode)
+              let end_line = case token.kind {
+                // Only these token kinds can span multiple lines
+                KString | TemplateLiteral -> {
+                  let raw_value = byte_slice(bytes, token.pos, token.raw_len)
+                  token_line + count_newlines_in(raw_value)
+                }
+                _ -> token_line
+              }
+              do_tokenize(bytes, end_pos, end_line, [token, ..acc], mode)
             }
             Error(e) -> Error(e)
           }
@@ -256,28 +264,29 @@ fn do_count_newlines(bytes: BitArray, count: Int) -> Int {
 }
 
 fn skip_whitespace_and_comments(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   mode: LexMode,
 ) -> Result(#(Int, Int), LexError) {
   // line_start: True when at start of input (-->  is valid comment there)
-  skip_ws(src, pos, 0, pos == 0, mode)
+  skip_ws(bytes, pos, 0, pos == 0, mode)
 }
 
 fn skip_ws(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   newlines: Int,
   line_start: Bool,
   mode: LexMode,
 ) -> Result(#(Int, Int), LexError) {
-  case char_at(src, pos) {
-    " "
-    | "\t"
-    | "\u{000B}"
-    | "\u{000C}"
-    | "\u{00A0}"
-    | "\u{FEFF}"
+  case char_at(bytes, pos) {
+    // ASCII whitespace (1 byte each)
+    " " | "\t" | "\u{000B}" | "\u{000C}" ->
+      skip_ws(bytes, pos + 1, newlines, line_start, mode)
+    // 2-byte whitespace
+    "\u{00A0}" -> skip_ws(bytes, pos + 2, newlines, line_start, mode)
+    // 3-byte whitespace
+    "\u{FEFF}"
     | "\u{1680}"
     | "\u{2000}"
     | "\u{2001}"
@@ -292,27 +301,29 @@ fn skip_ws(
     | "\u{200A}"
     | "\u{202F}"
     | "\u{205F}"
-    | "\u{3000}" -> skip_ws(src, pos + 1, newlines, line_start, mode)
-    "\r\n" | "\n" | "\r" -> skip_ws(src, pos + 1, newlines + 1, True, mode)
-    "\u{2028}" | "\u{2029}" -> skip_ws(src, pos + 1, newlines + 1, True, mode)
+    | "\u{3000}" -> skip_ws(bytes, pos + 3, newlines, line_start, mode)
+    // Line endings
+    "\r\n" -> skip_ws(bytes, pos + 2, newlines + 1, True, mode)
+    "\n" | "\r" -> skip_ws(bytes, pos + 1, newlines + 1, True, mode)
+    "\u{2028}" | "\u{2029}" -> skip_ws(bytes, pos + 3, newlines + 1, True, mode)
     "/" ->
-      case char_at(src, pos + 1) {
-        "/" -> skip_line_comment(src, pos + 2, newlines, line_start, mode)
-        "*" -> skip_block_comment(src, pos + 2, newlines, line_start, mode)
+      case char_at(bytes, pos + 1) {
+        "/" -> skip_line_comment(bytes, pos + 2, newlines, line_start, mode)
+        "*" -> skip_block_comment(bytes, pos + 2, newlines, line_start, mode)
         _ -> Ok(#(pos, newlines))
       }
     "<" ->
-      case slice(src, pos, 4) {
+      case byte_slice(bytes, pos, 4) {
         "<!--" ->
           case mode {
             LexModule -> Error(HtmlCommentInModule(pos))
             LexScript ->
-              skip_line_comment(src, pos + 4, newlines, line_start, mode)
+              skip_line_comment(bytes, pos + 4, newlines, line_start, mode)
           }
         _ -> Ok(#(pos, newlines))
       }
     "-" ->
-      case slice(src, pos, 3) {
+      case byte_slice(bytes, pos, 3) {
         "-->" ->
           case mode {
             LexModule -> Error(HtmlCommentInModule(pos))
@@ -320,15 +331,15 @@ fn skip_ws(
               // --> is only a comment at start of a line
               case line_start {
                 True ->
-                  skip_line_comment(src, pos + 3, newlines, line_start, mode)
+                  skip_line_comment(bytes, pos + 3, newlines, line_start, mode)
                 False -> Ok(#(pos, newlines))
               }
           }
         _ -> Ok(#(pos, newlines))
       }
     "#" if pos == 0 ->
-      case char_at(src, pos + 1) {
-        "!" -> skip_line_comment(src, pos + 2, newlines, line_start, mode)
+      case char_at(bytes, pos + 1) {
+        "!" -> skip_line_comment(bytes, pos + 2, newlines, line_start, mode)
         _ -> Ok(#(pos, newlines))
       }
     _ -> Ok(#(pos, newlines))
@@ -336,107 +347,122 @@ fn skip_ws(
 }
 
 fn skip_line_comment(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   newlines: Int,
   _line_start: Bool,
   mode: LexMode,
 ) -> Result(#(Int, Int), LexError) {
-  case char_at(src, pos) {
+  case char_at(bytes, pos) {
     "" -> Ok(#(pos, newlines))
-    "\r\n" | "\n" | "\r" -> skip_ws(src, pos + 1, newlines + 1, True, mode)
-    "\u{2028}" | "\u{2029}" -> skip_ws(src, pos + 1, newlines + 1, True, mode)
-    _ -> skip_line_comment(src, pos + 1, newlines, False, mode)
+    "\r\n" -> skip_ws(bytes, pos + 2, newlines + 1, True, mode)
+    "\n" | "\r" -> skip_ws(bytes, pos + 1, newlines + 1, True, mode)
+    "\u{2028}" | "\u{2029}" -> skip_ws(bytes, pos + 3, newlines + 1, True, mode)
+    _ ->
+      skip_line_comment(
+        bytes,
+        pos + char_width_at(bytes, pos),
+        newlines,
+        False,
+        mode,
+      )
   }
 }
 
 fn skip_block_comment(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   newlines: Int,
   line_start: Bool,
   mode: LexMode,
 ) -> Result(#(Int, Int), LexError) {
-  case char_at(src, pos) {
+  case char_at(bytes, pos) {
     "" -> Error(UnterminatedBlockComment(pos))
-    "\r\n" | "\n" | "\r" ->
-      skip_block_comment(src, pos + 1, newlines + 1, True, mode)
+    "\r\n" -> skip_block_comment(bytes, pos + 2, newlines + 1, True, mode)
+    "\n" | "\r" -> skip_block_comment(bytes, pos + 1, newlines + 1, True, mode)
     "\u{2028}" | "\u{2029}" ->
-      skip_block_comment(src, pos + 1, newlines + 1, True, mode)
+      skip_block_comment(bytes, pos + 3, newlines + 1, True, mode)
     "*" ->
-      case char_at(src, pos + 1) {
-        "/" -> skip_ws(src, pos + 2, newlines, line_start, mode)
-        _ -> skip_block_comment(src, pos + 1, newlines, line_start, mode)
+      case char_at(bytes, pos + 1) {
+        "/" -> skip_ws(bytes, pos + 2, newlines, line_start, mode)
+        _ -> skip_block_comment(bytes, pos + 1, newlines, line_start, mode)
       }
-    _ -> skip_block_comment(src, pos + 1, newlines, line_start, mode)
+    _ ->
+      skip_block_comment(
+        bytes,
+        pos + char_width_at(bytes, pos),
+        newlines,
+        line_start,
+        mode,
+      )
   }
 }
 
-/// Create a token. Line number is set to 0 here — the tokenize loop overwrites it.
-fn tok(kind: TokenKind, value: String, pos: Int) -> Token {
-  Token(kind:, value:, pos:, line: 0, raw_len: string.length(value))
+/// Create a token with explicit raw_len (in bytes).
+fn tokn(kind: TokenKind, value: String, pos: Int, raw_len: Int) -> Token {
+  Token(kind:, value:, pos:, line: 0, raw_len:)
 }
 
-fn read_token(src: String, pos: Int) -> Result(Token, LexError) {
-  let ch = char_at(src, pos)
+fn read_token(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  let ch = char_at(bytes, pos)
   case ch {
     // Single-char punctuation
-    "(" -> Ok(tok(LeftParen, "(", pos))
-    ")" -> Ok(tok(RightParen, ")", pos))
-    "{" -> Ok(tok(LeftBrace, "{", pos))
-    "}" -> Ok(tok(RightBrace, "}", pos))
-    "[" -> Ok(tok(LeftBracket, "[", pos))
-    "]" -> Ok(tok(RightBracket, "]", pos))
-    ";" -> Ok(tok(Semicolon, ";", pos))
-    "," -> Ok(tok(Comma, ",", pos))
-    "~" -> Ok(tok(Tilde, "~", pos))
-    ":" -> Ok(tok(Colon, ":", pos))
+    "(" -> Ok(tokn(LeftParen, "(", pos, 1))
+    ")" -> Ok(tokn(RightParen, ")", pos, 1))
+    "{" -> Ok(tokn(LeftBrace, "{", pos, 1))
+    "}" -> Ok(tokn(RightBrace, "}", pos, 1))
+    "[" -> Ok(tokn(LeftBracket, "[", pos, 1))
+    "]" -> Ok(tokn(RightBracket, "]", pos, 1))
+    ";" -> Ok(tokn(Semicolon, ";", pos, 1))
+    "," -> Ok(tokn(Comma, ",", pos, 1))
+    "~" -> Ok(tokn(Tilde, "~", pos, 1))
+    ":" -> Ok(tokn(Colon, ":", pos, 1))
 
     // Dot / spread
-    "." -> read_dot(src, pos)
+    "." -> read_dot(bytes, pos)
 
     // Operators with multi-char variants
-    "+" -> read_plus(src, pos)
-    "-" -> read_minus(src, pos)
-    "*" -> read_star(src, pos)
-    "/" -> read_slash(src, pos)
-    "%" -> read_percent(src, pos)
-    "=" -> read_equal(src, pos)
-    "!" -> read_bang(src, pos)
-    "<" -> read_less_than(src, pos)
-    ">" -> read_greater_than(src, pos)
-    "&" -> read_ampersand(src, pos)
-    "|" -> read_pipe(src, pos)
-    "^" -> read_caret(src, pos)
-    "?" -> read_question(src, pos)
+    "+" -> read_plus(bytes, pos)
+    "-" -> read_minus(bytes, pos)
+    "*" -> read_star(bytes, pos)
+    "/" -> read_slash(bytes, pos)
+    "%" -> read_percent(bytes, pos)
+    "=" -> read_equal(bytes, pos)
+    "!" -> read_bang(bytes, pos)
+    "<" -> read_less_than(bytes, pos)
+    ">" -> read_greater_than(bytes, pos)
+    "&" -> read_ampersand(bytes, pos)
+    "|" -> read_pipe(bytes, pos)
+    "^" -> read_caret(bytes, pos)
+    "?" -> read_question(bytes, pos)
 
     // String literals
-    "\"" -> read_string(src, pos, "\"")
-    "'" -> read_string(src, pos, "'")
+    "\"" -> read_string(bytes, pos, "\"")
+    "'" -> read_string(bytes, pos, "'")
 
     // Template literals
-    "`" -> read_template_literal(src, pos)
+    "`" -> read_template_literal(bytes, pos)
 
     // Numbers
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      read_number(src, pos)
+      read_number(bytes, pos)
 
     // Identifiers and keywords
     "\\" ->
-      case char_at(src, pos + 1) {
+      case char_at(bytes, pos + 1) {
         "u" ->
           // Try reading as identifier with unicode escape (\uXXXX or \u{XXXX}).
           // If it fails (e.g. the codepoint isn't a valid identifier char),
           // fall back to Illegal spanning the full escape sequence so the
           // lexer skips past it entirely (avoids IdentifierAfterNumericLiteral
           // errors on sequences like \u{1ffff} inside regex bodies).
-          case read_identifier(src, pos) {
+          case read_identifier(bytes, pos) {
             Ok(token) -> Ok(token)
             Error(_) -> {
-              let escape_span = unicode_escape_span(src, pos)
+              let escape_span = unicode_escape_span(bytes, pos)
               Ok(Token(
                 kind: Illegal,
-                value: slice(src, pos, escape_span),
+                value: byte_slice(bytes, pos, escape_span),
                 pos: pos,
                 line: 0,
                 raw_len: escape_span,
@@ -446,11 +472,11 @@ fn read_token(src: String, pos: Int) -> Result(Token, LexError) {
         // Backslash not followed by 'u' — not a valid identifier escape.
         // Produce an Illegal token so the lexer can continue past
         // characters that will be re-scanned as regex body by the parser.
-        _ -> Ok(tok(Illegal, "\\", pos))
+        _ -> Ok(tokn(Illegal, "\\", pos, 1))
       }
     _ ->
       case is_identifier_start(ch) {
-        True -> read_identifier(src, pos)
+        True -> read_identifier(bytes, pos)
         False -> Error(UnexpectedCharacter(ch, pos))
       }
   }
@@ -458,159 +484,160 @@ fn read_token(src: String, pos: Int) -> Result(Token, LexError) {
 
 // --- Punctuation readers ---
 
-fn read_dot(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_dot(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "." ->
-      case char_at(src, pos + 2) {
-        "." -> Ok(tok(DotDotDot, "...", pos))
-        _ -> Ok(tok(Dot, ".", pos))
+      case char_at(bytes, pos + 2) {
+        "." -> Ok(tokn(DotDotDot, "...", pos, 3))
+        _ -> Ok(tokn(Dot, ".", pos, 1))
       }
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      read_number(src, pos)
-    _ -> Ok(tok(Dot, ".", pos))
+      read_number(bytes, pos)
+    _ -> Ok(tokn(Dot, ".", pos, 1))
   }
 }
 
-fn read_plus(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "+" -> Ok(tok(PlusPlus, "++", pos))
-    "=" -> Ok(tok(PlusEqual, "+=", pos))
-    _ -> Ok(tok(Plus, "+", pos))
+fn read_plus(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "+" -> Ok(tokn(PlusPlus, "++", pos, 2))
+    "=" -> Ok(tokn(PlusEqual, "+=", pos, 2))
+    _ -> Ok(tokn(Plus, "+", pos, 1))
   }
 }
 
-fn read_minus(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "-" -> Ok(tok(MinusMinus, "--", pos))
-    "=" -> Ok(tok(MinusEqual, "-=", pos))
-    _ -> Ok(tok(Minus, "-", pos))
+fn read_minus(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "-" -> Ok(tokn(MinusMinus, "--", pos, 2))
+    "=" -> Ok(tokn(MinusEqual, "-=", pos, 2))
+    _ -> Ok(tokn(Minus, "-", pos, 1))
   }
 }
 
-fn read_star(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_star(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "*" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(StarStarEqual, "**=", pos))
-        _ -> Ok(tok(StarStar, "**", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(StarStarEqual, "**=", pos, 3))
+        _ -> Ok(tokn(StarStar, "**", pos, 2))
       }
-    "=" -> Ok(tok(StarEqual, "*=", pos))
-    _ -> Ok(tok(Star, "*", pos))
+    "=" -> Ok(tokn(StarEqual, "*=", pos, 2))
+    _ -> Ok(tokn(Star, "*", pos, 1))
   }
 }
 
-fn read_slash(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "=" -> Ok(tok(SlashEqual, "/=", pos))
-    _ -> Ok(tok(Slash, "/", pos))
+fn read_slash(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "=" -> Ok(tokn(SlashEqual, "/=", pos, 2))
+    _ -> Ok(tokn(Slash, "/", pos, 1))
   }
 }
 
-fn read_percent(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "=" -> Ok(tok(PercentEqual, "%=", pos))
-    _ -> Ok(tok(Percent, "%", pos))
+fn read_percent(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "=" -> Ok(tokn(PercentEqual, "%=", pos, 2))
+    _ -> Ok(tokn(Percent, "%", pos, 1))
   }
 }
 
-fn read_equal(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_equal(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "=" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(EqualEqualEqual, "===", pos))
-        _ -> Ok(tok(EqualEqual, "==", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(EqualEqualEqual, "===", pos, 3))
+        _ -> Ok(tokn(EqualEqual, "==", pos, 2))
       }
-    ">" -> Ok(tok(Arrow, "=>", pos))
-    _ -> Ok(tok(Equal, "=", pos))
+    ">" -> Ok(tokn(Arrow, "=>", pos, 2))
+    _ -> Ok(tokn(Equal, "=", pos, 1))
   }
 }
 
-fn read_bang(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_bang(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "=" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(BangEqualEqual, "!==", pos))
-        _ -> Ok(tok(BangEqual, "!=", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(BangEqualEqual, "!==", pos, 3))
+        _ -> Ok(tokn(BangEqual, "!=", pos, 2))
       }
-    _ -> Ok(tok(Bang, "!", pos))
+    _ -> Ok(tokn(Bang, "!", pos, 1))
   }
 }
 
-fn read_less_than(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "=" -> Ok(tok(LessThanEqual, "<=", pos))
+fn read_less_than(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "=" -> Ok(tokn(LessThanEqual, "<=", pos, 2))
     "<" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(LessThanLessThanEqual, "<<=", pos))
-        _ -> Ok(tok(LessThanLessThan, "<<", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(LessThanLessThanEqual, "<<=", pos, 3))
+        _ -> Ok(tokn(LessThanLessThan, "<<", pos, 2))
       }
-    _ -> Ok(tok(LessThan, "<", pos))
+    _ -> Ok(tokn(LessThan, "<", pos, 1))
   }
 }
 
-fn read_greater_than(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "=" -> Ok(tok(GreaterThanEqual, ">=", pos))
+fn read_greater_than(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "=" -> Ok(tokn(GreaterThanEqual, ">=", pos, 2))
     ">" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(GreaterThanGreaterThanEqual, ">>=", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(GreaterThanGreaterThanEqual, ">>=", pos, 3))
         ">" ->
-          case char_at(src, pos + 3) {
-            "=" -> Ok(tok(GreaterThanGreaterThanGreaterThanEqual, ">>>=", pos))
-            _ -> Ok(tok(GreaterThanGreaterThanGreaterThan, ">>>", pos))
+          case char_at(bytes, pos + 3) {
+            "=" ->
+              Ok(tokn(GreaterThanGreaterThanGreaterThanEqual, ">>>=", pos, 4))
+            _ -> Ok(tokn(GreaterThanGreaterThanGreaterThan, ">>>", pos, 3))
           }
-        _ -> Ok(tok(GreaterThanGreaterThan, ">>", pos))
+        _ -> Ok(tokn(GreaterThanGreaterThan, ">>", pos, 2))
       }
-    _ -> Ok(tok(GreaterThan, ">", pos))
+    _ -> Ok(tokn(GreaterThan, ">", pos, 1))
   }
 }
 
-fn read_ampersand(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_ampersand(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "&" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(AmpersandAmpersandEqual, "&&=", pos))
-        _ -> Ok(tok(AmpersandAmpersand, "&&", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(AmpersandAmpersandEqual, "&&=", pos, 3))
+        _ -> Ok(tokn(AmpersandAmpersand, "&&", pos, 2))
       }
-    "=" -> Ok(tok(AmpersandEqual, "&=", pos))
-    _ -> Ok(tok(Ampersand, "&", pos))
+    "=" -> Ok(tokn(AmpersandEqual, "&=", pos, 2))
+    _ -> Ok(tokn(Ampersand, "&", pos, 1))
   }
 }
 
-fn read_pipe(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_pipe(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "|" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(PipePipeEqual, "||=", pos))
-        _ -> Ok(tok(PipePipe, "||", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(PipePipeEqual, "||=", pos, 3))
+        _ -> Ok(tokn(PipePipe, "||", pos, 2))
       }
-    "=" -> Ok(tok(PipeEqual, "|=", pos))
-    _ -> Ok(tok(Pipe, "|", pos))
+    "=" -> Ok(tokn(PipeEqual, "|=", pos, 2))
+    _ -> Ok(tokn(Pipe, "|", pos, 1))
   }
 }
 
-fn read_caret(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
-    "=" -> Ok(tok(CaretEqual, "^=", pos))
-    _ -> Ok(tok(Caret, "^", pos))
+fn read_caret(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
+    "=" -> Ok(tokn(CaretEqual, "^=", pos, 2))
+    _ -> Ok(tokn(Caret, "^", pos, 1))
   }
 }
 
-fn read_question(src: String, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos + 1) {
+fn read_question(bytes: BitArray, pos: Int) -> Result(Token, LexError) {
+  case char_at(bytes, pos + 1) {
     "?" ->
-      case char_at(src, pos + 2) {
-        "=" -> Ok(tok(QuestionQuestionEqual, "??=", pos))
-        _ -> Ok(tok(QuestionQuestion, "??", pos))
+      case char_at(bytes, pos + 2) {
+        "=" -> Ok(tokn(QuestionQuestionEqual, "??=", pos, 3))
+        _ -> Ok(tokn(QuestionQuestion, "??", pos, 2))
       }
     "." ->
       // ?. but not ?.digit (that would be ? followed by .5 etc)
-      case char_at(src, pos + 2) {
+      case char_at(bytes, pos + 2) {
         "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-          Ok(tok(Question, "?", pos))
-        _ -> Ok(tok(QuestionDot, "?.", pos))
+          Ok(tokn(Question, "?", pos, 1))
+        _ -> Ok(tokn(QuestionDot, "?.", pos, 2))
       }
-    _ -> Ok(tok(Question, "?", pos))
+    _ -> Ok(tokn(Question, "?", pos, 1))
   }
 }
 
@@ -646,15 +673,15 @@ fn is_hex_digit(ch: String) -> Bool {
 
 /// Validate escape sequence starting after the backslash.
 /// `pos` points to the character right after `\`.
-/// Returns Ok(skip_count) where skip_count is how many chars to skip total
+/// Returns Ok(skip_count) where skip_count is how many bytes to skip total
 /// (including the backslash), or Error with a LexError.
 fn validate_escape(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   backslash_pos: Int,
   in_template: Bool,
 ) -> Result(Int, LexError) {
-  let ch = char_at(src, pos)
+  let ch = char_at(bytes, pos)
   case ch {
     // \8 and \9 are always invalid
     "8" | "9" -> Error(InvalidEscapeSequence(backslash_pos))
@@ -668,7 +695,7 @@ fn validate_escape(
           // In templates, only \0 NOT followed by a digit is valid (null char)
           case ch {
             "0" ->
-              case char_at(src, pos + 1) {
+              case char_at(bytes, pos + 1) {
                 "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
                   Error(InvalidEscapeSequence(backslash_pos))
                 _ -> Ok(2)
@@ -680,8 +707,8 @@ fn validate_escape(
 
     // \x must be followed by exactly 2 hex digits
     "x" -> {
-      let h1 = char_at(src, pos + 1)
-      let h2 = char_at(src, pos + 2)
+      let h1 = char_at(bytes, pos + 1)
+      let h2 = char_at(bytes, pos + 2)
       case is_hex_digit(h1) && is_hex_digit(h2) {
         True -> Ok(4)
         False -> Error(InvalidHexEscapeSequence(backslash_pos))
@@ -689,36 +716,37 @@ fn validate_escape(
     }
 
     // \u must be followed by 4 hex digits or {hex_digits} with value <= 0x10FFFF
-    "u" -> validate_unicode_escape(src, pos + 1, backslash_pos)
+    "u" -> validate_unicode_escape(bytes, pos + 1, backslash_pos)
 
-    // Line continuations — skip backslash + newline (all treated as 2 chars)
-    "\r\n" | "\r" | "\n" -> Ok(2)
+    // Line continuations — \r\n is 3 bytes total (\=1, \r\n=2), others are 2
+    "\r\n" -> Ok(3)
+    "\r" | "\n" -> Ok(2)
 
-    // Standard escapes and all other single-char escapes — skip 2
-    _ -> Ok(2)
+    // Standard escapes and all other single-char escapes
+    _ -> Ok(1 + char_width_at(bytes, pos))
   }
 }
 
 /// Validate \u escape. `pos` points to the char after 'u'.
 fn validate_unicode_escape(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   backslash_pos: Int,
 ) -> Result(Int, LexError) {
-  case char_at(src, pos) {
+  case char_at(bytes, pos) {
     "{" -> {
       // Braced unicode escape: \u{XXXX}
       // Collect hex digits until }
       let digits_start = pos + 1
-      let digits_end = skip_hex_run(src, digits_start)
+      let digits_end = skip_hex_run(bytes, digits_start)
       let digit_count = digits_end - digits_start
       case digit_count == 0 {
         True -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
         False ->
-          case char_at(src, digits_end) {
+          case char_at(bytes, digits_end) {
             "}" -> {
               // Validate the codepoint value <= 0x10FFFF
-              let hex_str = slice(src, digits_start, digit_count)
+              let hex_str = byte_slice(bytes, digits_start, digit_count)
               case int.base_parse(hex_str, 16) {
                 Ok(value) ->
                   case value > 0x10FFFF {
@@ -735,10 +763,10 @@ fn validate_unicode_escape(
     }
     _ -> {
       // Non-braced: must be exactly 4 hex digits
-      let h1 = char_at(src, pos)
-      let h2 = char_at(src, pos + 1)
-      let h3 = char_at(src, pos + 2)
-      let h4 = char_at(src, pos + 3)
+      let h1 = char_at(bytes, pos)
+      let h2 = char_at(bytes, pos + 1)
+      let h3 = char_at(bytes, pos + 2)
+      let h4 = char_at(bytes, pos + 3)
       case
         is_hex_digit(h1)
         && is_hex_digit(h2)
@@ -753,22 +781,22 @@ fn validate_unicode_escape(
 }
 
 /// Skip consecutive hex digits (no underscores). Used for \u{} validation.
-fn skip_hex_run(src: String, pos: Int) -> Int {
-  case is_hex_digit(char_at(src, pos)) {
-    True -> skip_hex_run(src, pos + 1)
+fn skip_hex_run(bytes: BitArray, pos: Int) -> Int {
+  case is_hex_digit(char_at(bytes, pos)) {
+    True -> skip_hex_run(bytes, pos + 1)
     False -> pos
   }
 }
 
-/// Compute the span of a \u escape sequence starting at `pos` (the backslash).
-/// Returns the number of characters in the escape: \u{...} or \uXXXX.
+/// Compute the byte span of a \u escape sequence starting at `pos` (the backslash).
+/// Returns the number of bytes in the escape: \u{...} or \uXXXX.
 /// Falls back to 2 (just \u) if the format doesn't match.
-fn unicode_escape_span(src: String, pos: Int) -> Int {
-  case char_at(src, pos + 2) {
+fn unicode_escape_span(bytes: BitArray, pos: Int) -> Int {
+  case char_at(bytes, pos + 2) {
     "{" -> {
       // \u{...} — scan to the closing }
-      let digits_end = skip_hex_run(src, pos + 3)
-      case char_at(src, digits_end) {
+      let digits_end = skip_hex_run(bytes, pos + 3)
+      case char_at(bytes, digits_end) {
         "}" -> digits_end + 1 - pos
         _ -> 2
       }
@@ -776,10 +804,10 @@ fn unicode_escape_span(src: String, pos: Int) -> Int {
     _ -> {
       // \uXXXX — 4 hex digits
       case
-        is_hex_digit(char_at(src, pos + 2))
-        && is_hex_digit(char_at(src, pos + 3))
-        && is_hex_digit(char_at(src, pos + 4))
-        && is_hex_digit(char_at(src, pos + 5))
+        is_hex_digit(char_at(bytes, pos + 2))
+        && is_hex_digit(char_at(bytes, pos + 3))
+        && is_hex_digit(char_at(bytes, pos + 4))
+        && is_hex_digit(char_at(bytes, pos + 5))
       {
         True -> 6
         False -> 2
@@ -791,30 +819,30 @@ fn unicode_escape_span(src: String, pos: Int) -> Int {
 // --- String reader ---
 
 fn read_string(
-  src: String,
+  bytes: BitArray,
   start: Int,
   quote: String,
 ) -> Result(Token, LexError) {
-  read_string_body(src, start + 1, start, quote)
+  read_string_body(bytes, start + 1, start, quote)
 }
 
 fn read_string_body(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
   quote: String,
 ) -> Result(Token, LexError) {
-  let ch = char_at(src, pos)
+  let ch = char_at(bytes, pos)
   case ch {
     "" -> Error(UnterminatedStringLiteral(start))
     "\r\n" | "\n" | "\r" -> Error(UnterminatedStringLiteral(start))
     "\\" -> {
-      let next = char_at(src, pos + 1)
+      let next = char_at(bytes, pos + 1)
       case next {
         "" -> Error(UnterminatedStringLiteral(start))
         _ ->
-          case validate_escape(src, pos + 1, pos, False) {
-            Ok(skip) -> read_string_body(src, pos + skip, start, quote)
+          case validate_escape(bytes, pos + 1, pos, False) {
+            Ok(skip) -> read_string_body(bytes, pos + skip, start, quote)
             Error(e) -> Error(e)
           }
       }
@@ -823,246 +851,262 @@ fn read_string_body(
       case ch == quote {
         True -> {
           let len = pos - start + 1
-          Ok(tok(KString, slice(src, start, len), start))
+          Ok(tokn(KString, byte_slice(bytes, start, len), start, len))
         }
-        False -> read_string_body(src, pos + 1, start, quote)
+        False ->
+          read_string_body(bytes, pos + char_width_at(bytes, pos), start, quote)
       }
   }
 }
 
 // --- Template literal reader ---
 
-fn read_template_literal(src: String, start: Int) -> Result(Token, LexError) {
-  read_template_body(src, start + 1, start, 0)
+fn read_template_literal(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+  read_template_body(bytes, start + 1, start, 0)
 }
 
 fn read_template_body(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
   brace_depth: Int,
 ) -> Result(Token, LexError) {
-  let ch = char_at(src, pos)
+  let ch = char_at(bytes, pos)
   case ch {
     "" -> Error(UnterminatedTemplateLiteral(start))
     "\\" -> {
-      let next = char_at(src, pos + 1)
+      let next = char_at(bytes, pos + 1)
       case next {
         "" -> Error(UnterminatedTemplateLiteral(start))
         _ ->
-          case validate_escape(src, pos + 1, pos, True) {
-            Ok(skip) -> read_template_body(src, pos + skip, start, brace_depth)
+          case validate_escape(bytes, pos + 1, pos, True) {
+            Ok(skip) ->
+              read_template_body(bytes, pos + skip, start, brace_depth)
             Error(e) -> Error(e)
           }
       }
     }
     "$" ->
-      case char_at(src, pos + 1) {
-        "{" -> read_template_body(src, pos + 2, start, brace_depth + 1)
-        _ -> read_template_body(src, pos + 1, start, brace_depth)
+      case char_at(bytes, pos + 1) {
+        "{" -> read_template_body(bytes, pos + 2, start, brace_depth + 1)
+        _ -> read_template_body(bytes, pos + 1, start, brace_depth)
       }
-    "{" -> read_template_body(src, pos + 1, start, brace_depth + 1)
+    "{" -> read_template_body(bytes, pos + 1, start, brace_depth + 1)
     "}" ->
       case brace_depth > 0 {
-        True -> read_template_body(src, pos + 1, start, brace_depth - 1)
-        False -> read_template_body(src, pos + 1, start, 0)
+        True -> read_template_body(bytes, pos + 1, start, brace_depth - 1)
+        False -> read_template_body(bytes, pos + 1, start, 0)
       }
     "`" ->
       case brace_depth > 0 {
         // Nested template literal inside an expression — skip it
         True -> {
-          case read_template_literal(src, pos) {
+          case read_template_literal(bytes, pos) {
             Ok(inner) -> {
               let end_pos = inner.pos + inner.raw_len
-              read_template_body(src, end_pos, start, brace_depth)
+              read_template_body(bytes, end_pos, start, brace_depth)
             }
             Error(e) -> Error(e)
           }
         }
         False -> {
           let len = pos - start + 1
-          Ok(tok(TemplateLiteral, slice(src, start, len), start))
+          Ok(tokn(TemplateLiteral, byte_slice(bytes, start, len), start, len))
         }
       }
-    _ -> read_template_body(src, pos + 1, start, brace_depth)
+    _ ->
+      read_template_body(
+        bytes,
+        pos + char_width_at(bytes, pos),
+        start,
+        brace_depth,
+      )
   }
 }
 
 // --- Number reader ---
 
-fn read_number(src: String, start: Int) -> Result(Token, LexError) {
-  case char_at(src, start) {
+fn read_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+  case char_at(bytes, start) {
     "0" ->
-      case char_at(src, start + 1) {
-        "x" | "X" -> read_hex_number(src, start + 2, start)
-        "o" | "O" -> read_octal_number(src, start + 2, start)
-        "b" | "B" -> read_binary_number(src, start + 2, start)
-        _ -> read_decimal_number(src, start)
+      case char_at(bytes, start + 1) {
+        "x" | "X" -> read_hex_number(bytes, start + 2, start)
+        "o" | "O" -> read_octal_number(bytes, start + 2, start)
+        "b" | "B" -> read_binary_number(bytes, start + 2, start)
+        _ -> read_decimal_number(bytes, start)
       }
-    "." -> read_decimal_after_dot(src, start + 1, start)
-    _ -> read_decimal_number(src, start)
+    "." -> read_decimal_after_dot(bytes, start + 1, start)
+    _ -> read_decimal_number(bytes, start)
   }
 }
 
-fn read_decimal_number(src: String, start: Int) -> Result(Token, LexError) {
-  case skip_digits(src, start) {
+fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+  case skip_digits(bytes, start) {
     Error(e) -> Error(e)
     Ok(pos) -> {
       // Check for legacy octal (0-prefixed like 01, 07) — don't consume dot
       let is_legacy_octal =
-        char_at(src, start) == "0"
+        char_at(bytes, start) == "0"
         && pos - start > 1
-        && !has_non_octal(src, start + 1, pos)
-      case char_at(src, pos) {
+        && !has_non_octal(bytes, start + 1, pos)
+      case char_at(bytes, pos) {
         "." ->
           case is_legacy_octal {
-            True -> finish_number(src, start, pos)
+            True -> finish_number(bytes, start, pos)
             False ->
-              case char_at(src, pos + 1) {
+              case char_at(bytes, pos + 1) {
                 // Two dots: include trailing dot in number (123. is a valid float)
-                "." -> finish_number(src, start, pos + 1)
+                "." -> finish_number(bytes, start, pos + 1)
                 _ ->
-                  case skip_digits(src, pos + 1) {
+                  case skip_digits(bytes, pos + 1) {
                     Error(e) -> Error(e)
-                    Ok(pos2) -> read_exponent(src, start, pos2)
+                    Ok(pos2) -> read_exponent(bytes, start, pos2)
                   }
               }
           }
-        "e" | "E" -> read_exponent(src, start, pos)
+        "e" | "E" -> read_exponent(bytes, start, pos)
         "n" -> {
           // BigInt
           let end = pos + 1
-          case check_after_numeric(src, end) {
+          case check_after_numeric(bytes, end) {
             Ok(_) -> {
               let len = end - start
-              Ok(tok(Number, slice(src, start, len), start))
+              Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
             }
             Error(e) -> Error(e)
           }
         }
-        _ -> finish_number(src, start, pos)
+        _ -> finish_number(bytes, start, pos)
       }
     }
   }
 }
 
-fn has_non_octal(src: String, pos: Int, end: Int) -> Bool {
+fn has_non_octal(bytes: BitArray, pos: Int, end: Int) -> Bool {
   case pos >= end {
     True -> False
     False ->
-      case char_at(src, pos) {
+      case char_at(bytes, pos) {
         "8" | "9" -> True
-        _ -> has_non_octal(src, pos + 1, end)
+        _ -> has_non_octal(bytes, pos + 1, end)
       }
   }
 }
 
 fn read_decimal_after_dot(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_digits(src, pos) {
+  case skip_digits(bytes, pos) {
     Error(e) -> Error(e)
-    Ok(pos2) -> read_exponent(src, start, pos2)
+    Ok(pos2) -> read_exponent(bytes, start, pos2)
   }
 }
 
-fn read_exponent(src: String, start: Int, pos: Int) -> Result(Token, LexError) {
-  case char_at(src, pos) {
+fn read_exponent(
+  bytes: BitArray,
+  start: Int,
+  pos: Int,
+) -> Result(Token, LexError) {
+  case char_at(bytes, pos) {
     "e" | "E" -> {
-      let pos2 = case char_at(src, pos + 1) {
+      let pos2 = case char_at(bytes, pos + 1) {
         "+" | "-" -> pos + 2
         _ -> pos + 1
       }
-      case skip_digits(src, pos2) {
+      case skip_digits(bytes, pos2) {
         Error(e) -> Error(e)
         Ok(pos3) ->
           case pos3 == pos2 {
             True -> Error(ExpectedExponentDigits(pos))
-            False -> finish_number(src, start, pos3)
+            False -> finish_number(bytes, start, pos3)
           }
       }
     }
-    _ -> finish_number(src, start, pos)
+    _ -> finish_number(bytes, start, pos)
   }
 }
 
-fn read_hex_number(src: String, pos: Int, start: Int) -> Result(Token, LexError) {
-  case skip_hex_digits(src, pos) {
+fn read_hex_number(
+  bytes: BitArray,
+  pos: Int,
+  start: Int,
+) -> Result(Token, LexError) {
+  case skip_hex_digits(bytes, pos) {
     Error(e) -> Error(e)
     Ok(end) ->
       case end == pos {
         True -> Error(ExpectedHexDigits(start))
         False ->
-          case char_at(src, end) {
+          case char_at(bytes, end) {
             "n" -> {
               let bigint_end = end + 1
-              case check_after_numeric(src, bigint_end) {
+              case check_after_numeric(bytes, bigint_end) {
                 Ok(_) -> {
                   let len = bigint_end - start
-                  Ok(tok(Number, slice(src, start, len), start))
+                  Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
                 }
                 Error(e) -> Error(e)
               }
             }
-            _ -> finish_number(src, start, end)
+            _ -> finish_number(bytes, start, end)
           }
       }
   }
 }
 
 fn read_octal_number(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_octal_digits(src, pos) {
+  case skip_octal_digits(bytes, pos) {
     Error(e) -> Error(e)
     Ok(end) ->
       case end == pos {
         True -> Error(ExpectedOctalDigits(start))
         False ->
-          case char_at(src, end) {
+          case char_at(bytes, end) {
             "n" -> {
               let bigint_end = end + 1
-              case check_after_numeric(src, bigint_end) {
+              case check_after_numeric(bytes, bigint_end) {
                 Ok(_) -> {
                   let len = bigint_end - start
-                  Ok(tok(Number, slice(src, start, len), start))
+                  Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
                 }
                 Error(e) -> Error(e)
               }
             }
-            _ -> finish_number(src, start, end)
+            _ -> finish_number(bytes, start, end)
           }
       }
   }
 }
 
 fn read_binary_number(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_binary_digits(src, pos) {
+  case skip_binary_digits(bytes, pos) {
     Error(e) -> Error(e)
     Ok(end) ->
       case end == pos {
         True -> Error(ExpectedBinaryDigits(start))
         False ->
-          case char_at(src, end) {
+          case char_at(bytes, end) {
             "n" -> {
               let bigint_end = end + 1
-              case check_after_numeric(src, bigint_end) {
+              case check_after_numeric(bytes, bigint_end) {
                 Ok(_) -> {
                   let len = bigint_end - start
-                  Ok(tok(Number, slice(src, start, len), start))
+                  Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
                 }
                 Error(e) -> Error(e)
               }
             }
-            _ -> finish_number(src, start, end)
+            _ -> finish_number(bytes, start, end)
           }
       }
   }
@@ -1071,8 +1115,8 @@ fn read_binary_number(
 /// Check that a numeric literal is not immediately followed by an identifier
 /// start character or decimal digit. Per the spec, NumericLiteral must not be
 /// immediately followed by IdentifierStart or DecimalDigit.
-fn check_after_numeric(src: String, end: Int) -> Result(Nil, LexError) {
-  let next = char_at(src, end)
+fn check_after_numeric(bytes: BitArray, end: Int) -> Result(Nil, LexError) {
+  let next = char_at(bytes, end)
   case next {
     "" -> Ok(Nil)
     _ ->
@@ -1083,12 +1127,16 @@ fn check_after_numeric(src: String, end: Int) -> Result(Nil, LexError) {
   }
 }
 
-fn finish_number(src: String, start: Int, end: Int) -> Result(Token, LexError) {
+fn finish_number(
+  bytes: BitArray,
+  start: Int,
+  end: Int,
+) -> Result(Token, LexError) {
   let len = end - start
   case len > 0 {
     True ->
-      case check_after_numeric(src, end) {
-        Ok(_) -> Ok(tok(Number, slice(src, start, len), start))
+      case check_after_numeric(bytes, end) {
+        Ok(_) -> Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
         Error(e) -> Error(e)
       }
     False -> Error(InvalidNumber(start))
@@ -1097,21 +1145,19 @@ fn finish_number(src: String, start: Int, end: Int) -> Result(Token, LexError) {
 
 /// Skip decimal digits with numeric separator validation.
 /// Returns Ok(end_pos) or Error if separator rules violated.
-/// `start` is the position where digits begin (for error reporting and
-/// checking that at least one digit was consumed).
-fn skip_digits(src: String, pos: Int) -> Result(Int, LexError) {
-  skip_digits_loop(src, pos, pos, False)
+fn skip_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_digits_loop(bytes, pos, pos, False)
 }
 
 fn skip_digits_loop(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
   prev_was_sep: Bool,
 ) -> Result(Int, LexError) {
-  case char_at(src, pos) {
+  case char_at(bytes, pos) {
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ->
-      skip_digits_loop(src, pos + 1, start, False)
+      skip_digits_loop(bytes, pos + 1, start, False)
     "_" ->
       case prev_was_sep {
         // Consecutive separators
@@ -1120,7 +1166,7 @@ fn skip_digits_loop(
           case pos == start {
             // Leading separator
             True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_digits_loop(src, pos + 1, start, True)
+            False -> skip_digits_loop(bytes, pos + 1, start, True)
           }
       }
     _ ->
@@ -1132,17 +1178,17 @@ fn skip_digits_loop(
 }
 
 /// Skip hex digits with numeric separator validation.
-fn skip_hex_digits(src: String, pos: Int) -> Result(Int, LexError) {
-  skip_hex_digits_loop(src, pos, pos, False)
+fn skip_hex_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_hex_digits_loop(bytes, pos, pos, False)
 }
 
 fn skip_hex_digits_loop(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
   prev_was_sep: Bool,
 ) -> Result(Int, LexError) {
-  case char_at(src, pos) {
+  case char_at(bytes, pos) {
     "0"
     | "1"
     | "2"
@@ -1164,14 +1210,14 @@ fn skip_hex_digits_loop(
     | "C"
     | "D"
     | "E"
-    | "F" -> skip_hex_digits_loop(src, pos + 1, start, False)
+    | "F" -> skip_hex_digits_loop(bytes, pos + 1, start, False)
     "_" ->
       case prev_was_sep {
         True -> Error(ConsecutiveNumericSeparator(pos))
         False ->
           case pos == start {
             True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_hex_digits_loop(src, pos + 1, start, True)
+            False -> skip_hex_digits_loop(bytes, pos + 1, start, True)
           }
       }
     _ ->
@@ -1183,26 +1229,26 @@ fn skip_hex_digits_loop(
 }
 
 /// Skip octal digits with numeric separator validation.
-fn skip_octal_digits(src: String, pos: Int) -> Result(Int, LexError) {
-  skip_octal_digits_loop(src, pos, pos, False)
+fn skip_octal_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_octal_digits_loop(bytes, pos, pos, False)
 }
 
 fn skip_octal_digits_loop(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
   prev_was_sep: Bool,
 ) -> Result(Int, LexError) {
-  case char_at(src, pos) {
+  case char_at(bytes, pos) {
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" ->
-      skip_octal_digits_loop(src, pos + 1, start, False)
+      skip_octal_digits_loop(bytes, pos + 1, start, False)
     "_" ->
       case prev_was_sep {
         True -> Error(ConsecutiveNumericSeparator(pos))
         False ->
           case pos == start {
             True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_octal_digits_loop(src, pos + 1, start, True)
+            False -> skip_octal_digits_loop(bytes, pos + 1, start, True)
           }
       }
     _ ->
@@ -1214,25 +1260,25 @@ fn skip_octal_digits_loop(
 }
 
 /// Skip binary digits with numeric separator validation.
-fn skip_binary_digits(src: String, pos: Int) -> Result(Int, LexError) {
-  skip_binary_digits_loop(src, pos, pos, False)
+fn skip_binary_digits(bytes: BitArray, pos: Int) -> Result(Int, LexError) {
+  skip_binary_digits_loop(bytes, pos, pos, False)
 }
 
 fn skip_binary_digits_loop(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   start: Int,
   prev_was_sep: Bool,
 ) -> Result(Int, LexError) {
-  case char_at(src, pos) {
-    "0" | "1" -> skip_binary_digits_loop(src, pos + 1, start, False)
+  case char_at(bytes, pos) {
+    "0" | "1" -> skip_binary_digits_loop(bytes, pos + 1, start, False)
     "_" ->
       case prev_was_sep {
         True -> Error(ConsecutiveNumericSeparator(pos))
         False ->
           case pos == start {
             True -> Error(LeadingNumericSeparator(pos))
-            False -> skip_binary_digits_loop(src, pos + 1, start, True)
+            False -> skip_binary_digits_loop(bytes, pos + 1, start, True)
           }
       }
     _ ->
@@ -1245,15 +1291,15 @@ fn skip_binary_digits_loop(
 
 // --- Identifier reader ---
 
-/// Build an identifier token from its raw source span.
+/// Build an identifier token from its raw source span (byte positions).
 /// If the raw text contains unicode escapes (\uXXXX or \u{XXXX}),
 /// the token value is the decoded canonical name and raw_len preserves
 /// the original source length for position tracking.
 /// Escaped identifiers are always Identifier kind (never keywords).
-fn make_identifier_token(src: String, start: Int, end: Int) -> Token {
+fn make_identifier_token(bytes: BitArray, start: Int, end: Int) -> Token {
   let raw_len = end - start
-  let raw = slice(src, start, raw_len)
-  case string_contains_backslash(raw, 0) {
+  let raw = byte_slice(bytes, start, raw_len)
+  case string.contains(raw, "\\") {
     False -> {
       let kind = keyword_or_identifier(raw)
       Token(kind:, value: raw, pos: start, line: 0, raw_len:)
@@ -1265,11 +1311,6 @@ fn make_identifier_token(src: String, start: Int, end: Int) -> Token {
       Token(kind: Identifier, value: decoded, pos: start, line: 0, raw_len:)
     }
   }
-}
-
-/// Check if a string contains a backslash character at or after position pos.
-fn string_contains_backslash(s: String, pos: Int) -> Bool {
-  string.drop_start(s, pos) |> string.contains("\\")
 }
 
 /// Decode unicode escape sequences in an identifier string.
@@ -1329,14 +1370,14 @@ fn decode_id_escapes_loop(remaining: String, acc: String) -> String {
   }
 }
 
-fn read_identifier(src: String, start: Int) -> Result(Token, LexError) {
-  case char_at(src, start) {
+fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
+  case char_at(bytes, start) {
     "\\" -> {
       // Must be a valid unicode escape that decodes to ID_Start
-      case validate_identifier_escape(src, start, True) {
+      case validate_identifier_escape(bytes, start, True) {
         Ok(first_end) -> {
-          case skip_identifier_chars_checked(src, first_end) {
-            Ok(end) -> Ok(make_identifier_token(src, start, end))
+          case skip_identifier_chars_checked(bytes, first_end) {
+            Ok(end) -> Ok(make_identifier_token(bytes, start, end))
             Error(e) -> Error(e)
           }
         }
@@ -1345,12 +1386,12 @@ fn read_identifier(src: String, start: Int) -> Result(Token, LexError) {
     }
     "#" -> {
       // Private field: # followed by identifier char
-      case char_at(src, start + 1) {
+      case char_at(bytes, start + 1) {
         "\\" -> {
-          case validate_identifier_escape(src, start + 1, True) {
+          case validate_identifier_escape(bytes, start + 1, True) {
             Ok(first_end) -> {
-              case skip_identifier_chars_checked(src, first_end) {
-                Ok(end) -> Ok(make_identifier_token(src, start, end))
+              case skip_identifier_chars_checked(bytes, first_end) {
+                Ok(end) -> Ok(make_identifier_token(bytes, start, end))
                 Error(e) -> Error(e)
               }
             }
@@ -1361,9 +1402,10 @@ fn read_identifier(src: String, start: Int) -> Result(Token, LexError) {
           // The char after # must be a valid identifier start (not # or \)
           case is_identifier_start_simple(ch2) {
             True -> {
-              let first_end = start + 2
-              case skip_identifier_chars_checked(src, first_end) {
-                Ok(end) -> Ok(make_identifier_token(src, start, end))
+              // # is 1 byte, then skip the first identifier char
+              let first_end = start + 1 + char_width_at(bytes, start + 1)
+              case skip_identifier_chars_checked(bytes, first_end) {
+                Ok(end) -> Ok(make_identifier_token(bytes, start, end))
                 Error(e) -> Error(e)
               }
             }
@@ -1373,9 +1415,9 @@ fn read_identifier(src: String, start: Int) -> Result(Token, LexError) {
       }
     }
     _ -> {
-      let first_end = start + 1
-      case skip_identifier_chars_checked(src, first_end) {
-        Ok(end) -> Ok(make_identifier_token(src, start, end))
+      let first_end = start + char_width_at(bytes, start)
+      case skip_identifier_chars_checked(bytes, first_end) {
+        Ok(end) -> Ok(make_identifier_token(bytes, start, end))
         Error(e) -> Error(e)
       }
     }
@@ -1387,25 +1429,25 @@ fn read_identifier(src: String, start: Int) -> Result(Token, LexError) {
 /// `is_start` indicates whether this is the first character (ID_Start) or not (ID_Continue).
 /// Returns Ok(end_pos) after the escape, or Error.
 fn validate_identifier_escape(
-  src: String,
+  bytes: BitArray,
   pos: Int,
   is_start: Bool,
 ) -> Result(Int, LexError) {
   // Must be \u
-  case char_at(src, pos + 1) {
+  case char_at(bytes, pos + 1) {
     "u" -> {
-      case char_at(src, pos + 2) {
+      case char_at(bytes, pos + 2) {
         "{" -> {
           // Braced: \u{XXXX}
           let digits_start = pos + 3
-          let digits_end = skip_hex_run(src, digits_start)
+          let digits_end = skip_hex_run(bytes, digits_start)
           let digit_count = digits_end - digits_start
           case digit_count == 0 {
             True -> Error(InvalidUnicodeEscapeSequence(pos))
             False ->
-              case char_at(src, digits_end) {
+              case char_at(bytes, digits_end) {
                 "}" -> {
-                  let hex_str = slice(src, digits_start, digit_count)
+                  let hex_str = byte_slice(bytes, digits_start, digit_count)
                   case int.base_parse(hex_str, 16) {
                     Ok(cp) ->
                       case cp > 0x10FFFF {
@@ -1425,10 +1467,10 @@ fn validate_identifier_escape(
         }
         _ -> {
           // Non-braced: \uXXXX — exactly 4 hex digits
-          let h1 = char_at(src, pos + 2)
-          let h2 = char_at(src, pos + 3)
-          let h3 = char_at(src, pos + 4)
-          let h4 = char_at(src, pos + 5)
+          let h1 = char_at(bytes, pos + 2)
+          let h2 = char_at(bytes, pos + 3)
+          let h3 = char_at(bytes, pos + 4)
+          let h4 = char_at(bytes, pos + 5)
           case
             is_hex_digit(h1)
             && is_hex_digit(h2)
@@ -1436,7 +1478,7 @@ fn validate_identifier_escape(
             && is_hex_digit(h4)
           {
             True -> {
-              let hex_str = slice(src, pos + 2, 4)
+              let hex_str = byte_slice(bytes, pos + 2, 4)
               case int.base_parse(hex_str, 16) {
                 Ok(cp) ->
                   case validate_identifier_codepoint(cp, is_start) {
@@ -1484,8 +1526,11 @@ fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
 
 /// Skip identifier continuation characters with validation.
 /// Returns Ok(end_pos) or Error for invalid escapes.
-fn skip_identifier_chars_checked(src: String, pos: Int) -> Result(Int, LexError) {
-  let ch = char_at(src, pos)
+fn skip_identifier_chars_checked(
+  bytes: BitArray,
+  pos: Int,
+) -> Result(Int, LexError) {
+  let ch = char_at(bytes, pos)
   case ch {
     "" -> Ok(pos)
     "\\" -> {
@@ -1493,14 +1538,15 @@ fn skip_identifier_chars_checked(src: String, pos: Int) -> Result(Int, LexError)
       // If it fails, treat the backslash as the end of the identifier rather
       // than a hard error. This allows the lexer to continue past characters
       // that will be re-scanned as regex body by the parser.
-      case validate_identifier_escape(src, pos, False) {
-        Ok(next_pos) -> skip_identifier_chars_checked(src, next_pos)
+      case validate_identifier_escape(bytes, pos, False) {
+        Ok(next_pos) -> skip_identifier_chars_checked(bytes, next_pos)
         Error(_) -> Ok(pos)
       }
     }
     _ ->
       case is_identifier_continue(ch) {
-        True -> skip_identifier_chars_checked(src, pos + 1)
+        True ->
+          skip_identifier_chars_checked(bytes, pos + char_width_at(bytes, pos))
         False -> Ok(pos)
       }
   }
@@ -1802,18 +1848,54 @@ fn keyword_or_identifier(word: String) -> TokenKind {
   }
 }
 
-// --- Character utilities ---
+// --- Character utilities (BitArray-based, O(1) access) ---
 
-/// Get a single grapheme at position `pos`.
-/// Returns "" if pos is past the end.
-fn char_at(s: String, pos: Int) -> String {
-  case pos < 0 {
-    True -> ""
-    False -> string.drop_start(s, pos) |> string.slice(0, 1)
+/// Get the byte width of the UTF-8 character at byte position `pos`.
+/// Returns 0 if pos is past the end.
+/// Returns 2 for \r\n (treated as single line ending).
+fn char_width_at(bytes: BitArray, pos: Int) -> Int {
+  case bit_array.slice(bytes, pos, 1) {
+    Error(_) -> 0
+    Ok(<<byte>>) ->
+      case byte {
+        0x0D ->
+          case bit_array.slice(bytes, pos + 1, 1) {
+            Ok(<<0x0A>>) -> 2
+            _ -> 1
+          }
+        b if b < 0x80 -> 1
+        b if b >= 0xC0 && b < 0xE0 -> 2
+        b if b >= 0xE0 && b < 0xF0 -> 3
+        b if b >= 0xF0 && b < 0xF8 -> 4
+        _ -> 1
+      }
+    _ -> 0
   }
 }
 
-/// Get a substring. Returns the available characters if fewer than `len`.
-fn slice(s: String, start: Int, len: Int) -> String {
-  s |> string.drop_start(start) |> string.slice(0, len)
+/// Get a single character at byte position `pos` in the UTF-8 byte array.
+/// Returns "" if pos is past the end.
+/// For \r followed by \n, returns "\r\n" (preserving existing comparison patterns).
+fn char_at(bytes: BitArray, pos: Int) -> String {
+  let width = char_width_at(bytes, pos)
+  case width {
+    0 -> ""
+    _ -> byte_slice(bytes, pos, width)
+  }
 }
+
+/// Get a substring from the byte array at [start, start+len).
+fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String {
+  case bit_array.slice(bytes, start, len) {
+    Ok(s) ->
+      case bit_array.to_string(s) {
+        Ok(str) -> str
+        Error(_) -> ""
+      }
+    Error(_) -> ""
+  }
+}
+
+/// O(1) byte_size of a String via Erlang BIF.
+@external(erlang, "erlang", "byte_size")
+pub fn string_byte_size(s: String) -> Int
