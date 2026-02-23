@@ -1242,6 +1242,18 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     Some(new_obj),
                   )
                 }
+                // Bound function used as constructor: resolve target, prepend args
+                Ok(ObjectSlot(
+                  kind: NativeFunction(value.NativeBoundFunction(
+                    target:,
+                    bound_args:,
+                    ..,
+                  )),
+                  ..,
+                )) -> {
+                  let final_args = list.append(bound_args, args)
+                  construct_value(state, target, final_args, rest_stack)
+                }
                 Ok(ObjectSlot(kind: NativeFunction(native), ..)) ->
                   call_native(state, native, args, rest_stack, JsUndefined)
                 _ -> {
@@ -1648,8 +1660,9 @@ fn call_function(
   }
 }
 
-/// Call a native (Gleam-implemented) function. No call frame is pushed —
-/// the native executes synchronously and pushes its result onto the stack.
+/// Call a native (Gleam-implemented) function. Most natives execute synchronously
+/// and push their result onto the stack. However, call/apply/bind need special
+/// handling because they invoke other functions (potentially pushing call frames).
 fn call_native(
   state: State,
   native: value.NativeFn,
@@ -1657,18 +1670,236 @@ fn call_native(
   rest_stack: List(JsValue),
   this: JsValue,
 ) -> Result(State, #(StepResult, JsValue, Heap)) {
-  let #(heap, result) = dispatch_native(native, args, this, state)
-  case result {
-    Ok(return_value) ->
-      Ok(
-        State(
-          ..state,
-          heap:,
-          stack: [return_value, ..rest_stack],
-          pc: state.pc + 1,
-        ),
+  case native {
+    // Function.prototype.call(thisArg, ...args)
+    // `this` is the target function, args[0] is the thisArg
+    value.NativeFunctionCall -> {
+      let #(this_arg, call_args) = case args {
+        [t, ..rest] -> #(t, rest)
+        [] -> #(JsUndefined, [])
+      }
+      call_value(State(..state, stack: rest_stack), this, call_args, this_arg)
+    }
+    // Function.prototype.apply(thisArg, argsArray)
+    // `this` is the target function, args[0] is thisArg, args[1] is array
+    value.NativeFunctionApply -> {
+      let this_arg = case args {
+        [t, ..] -> t
+        _ -> JsUndefined
+      }
+      let call_args = case args {
+        [_, JsObject(arr_ref), ..] -> extract_array_args(state.heap, arr_ref)
+        // null/undefined argsArray → no args
+        _ -> []
+      }
+      call_value(State(..state, stack: rest_stack), this, call_args, this_arg)
+    }
+    // Function.prototype.bind(thisArg, ...args)
+    // Creates a bound function object
+    value.NativeFunctionBind -> {
+      let #(this_arg, bound_args) = case args {
+        [t, ..rest] -> #(t, rest)
+        [] -> #(JsUndefined, [])
+      }
+      case this {
+        JsObject(target_ref) -> {
+          // Get the target's name for "bound <name>"
+          let name = case heap.read(state.heap, target_ref) {
+            Ok(ObjectSlot(properties:, ..)) ->
+              case dict.get(properties, "name") {
+                Ok(DataProperty(value: JsString(n), ..)) -> "bound " <> n
+                _ -> "bound "
+              }
+            _ -> "bound "
+          }
+          let #(h, bound_ref) =
+            heap.alloc(
+              state.heap,
+              ObjectSlot(
+                kind: NativeFunction(value.NativeBoundFunction(
+                  target: target_ref,
+                  bound_this: this_arg,
+                  bound_args:,
+                )),
+                properties: dict.from_list([
+                  #("name", value.builtin_property(JsString(name))),
+                ]),
+                elements: dict.new(),
+                prototype: Some(state.builtins.function.prototype),
+              ),
+            )
+          Ok(
+            State(
+              ..state,
+              heap: h,
+              stack: [JsObject(bound_ref), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        _ -> {
+          let #(h, err) =
+            object.make_type_error(
+              state.heap,
+              state.builtins,
+              "Bind must be called on a function",
+            )
+          Error(#(Thrown, err, h))
+        }
+      }
+    }
+    // Bound function: prepend bound_args, use bound_this
+    value.NativeBoundFunction(target:, bound_this:, bound_args:) -> {
+      let final_args = list.append(bound_args, args)
+      call_value(
+        State(..state, stack: rest_stack),
+        JsObject(target),
+        final_args,
+        bound_this,
       )
-    Error(thrown) -> Error(#(Thrown, thrown, heap))
+    }
+    // All other native functions: synchronous dispatch
+    _ -> {
+      let #(h, result) = dispatch_native(native, args, this, state)
+      case result {
+        Ok(return_value) ->
+          Ok(
+            State(
+              ..state,
+              heap: h,
+              stack: [return_value, ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        Error(thrown) -> Error(#(Thrown, thrown, h))
+      }
+    }
+  }
+}
+
+/// Construct a new object using the target function ref.
+/// Used by CallConstructor when the constructor is a bound function.
+fn construct_value(
+  state: State,
+  target_ref: Ref,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case heap.read(state.heap, target_ref) {
+    Ok(ObjectSlot(
+      kind: FunctionObject(func_index: _, env: env_ref),
+      properties:,
+      ..,
+    )) -> {
+      let proto = case dict.get(properties, "prototype") {
+        Ok(DataProperty(value: JsObject(proto_ref), ..)) -> Some(proto_ref)
+        _ -> Some(state.builtins.object.prototype)
+      }
+      let #(h, new_obj_ref) =
+        heap.alloc(
+          state.heap,
+          ObjectSlot(
+            kind: OrdinaryObject,
+            properties: dict.new(),
+            elements: dict.new(),
+            prototype: proto,
+          ),
+        )
+      let new_obj = JsObject(new_obj_ref)
+      call_function(
+        State(..state, heap: h),
+        target_ref,
+        env_ref,
+        args,
+        rest_stack,
+        new_obj,
+        Some(new_obj),
+      )
+    }
+    // Chained bound function: resolve further
+    Ok(ObjectSlot(
+      kind: NativeFunction(value.NativeBoundFunction(target:, bound_args:, ..)),
+      ..,
+    )) -> {
+      let final_args = list.append(bound_args, args)
+      construct_value(state, target, final_args, rest_stack)
+    }
+    Ok(ObjectSlot(kind: NativeFunction(native), ..)) ->
+      call_native(state, native, args, rest_stack, JsUndefined)
+    _ -> {
+      let #(h, err) =
+        object.make_type_error(
+          state.heap,
+          state.builtins,
+          "is not a constructor",
+        )
+      Error(#(Thrown, err, h))
+    }
+  }
+}
+
+/// Call an arbitrary JsValue as a function with the given this and args.
+/// Used by Function.prototype.call/apply and bound function invocation.
+fn call_value(
+  state: State,
+  callee: JsValue,
+  args: List(JsValue),
+  this_val: JsValue,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case callee {
+    JsObject(ref) ->
+      case heap.read(state.heap, ref) {
+        Ok(ObjectSlot(kind: FunctionObject(func_index: _, env: env_ref), ..)) ->
+          call_function(state, ref, env_ref, args, state.stack, this_val, None)
+        Ok(ObjectSlot(kind: NativeFunction(native), ..)) ->
+          call_native(state, native, args, state.stack, this_val)
+        _ -> {
+          let #(h, err) =
+            object.make_type_error(
+              state.heap,
+              state.builtins,
+              "object is not a function",
+            )
+          Error(#(Thrown, err, h))
+        }
+      }
+    _ -> {
+      let #(h, err) =
+        object.make_type_error(
+          state.heap,
+          state.builtins,
+          typeof_value(callee, state.heap) <> " is not a function",
+        )
+      Error(#(Thrown, err, h))
+    }
+  }
+}
+
+/// Extract elements from an array object as a list of JsValues.
+/// Used by Function.prototype.apply to unpack the args array.
+fn extract_array_args(h: Heap, ref: Ref) -> List(JsValue) {
+  case heap.read(h, ref) {
+    Ok(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) ->
+      extract_elements_loop(elements, 0, length, [])
+    _ -> []
+  }
+}
+
+fn extract_elements_loop(
+  elements: dict.Dict(Int, JsValue),
+  idx: Int,
+  length: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case idx >= length {
+    True -> list.reverse(acc)
+    False -> {
+      let val = case dict.get(elements, idx) {
+        Ok(v) -> v
+        Error(_) -> JsUndefined
+      }
+      extract_elements_loop(elements, idx + 1, length, [val, ..acc])
+    }
   }
 }
 
@@ -1701,6 +1932,13 @@ fn dispatch_native(
     value.NativeArrayIsArray -> builtins_array.is_array(args, state.heap)
     value.NativeErrorConstructor(proto:) ->
       builtins_error.call_native(proto, args, this, state.heap)
+    // These are handled in call_native before reaching dispatch_native.
+    // If we ever get here, it's a bug.
+    value.NativeFunctionCall
+    | value.NativeFunctionApply
+    | value.NativeFunctionBind
+    | value.NativeBoundFunction(..) ->
+      panic as "Function call/apply/bind/bound should be handled in call_native"
   }
 }
 

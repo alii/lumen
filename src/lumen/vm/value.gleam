@@ -56,6 +56,16 @@ pub type NativeFn {
   NativeArrayConstructor
   NativeArrayIsArray
   NativeErrorConstructor(proto: Ref)
+  NativeFunctionCall
+  NativeFunctionApply
+  NativeFunctionBind
+  /// A bound function created by Function.prototype.bind.
+  /// When called, prepends bound_args to the call args and uses bound_this.
+  NativeBoundFunction(
+    target: Ref,
+    bound_this: JsValue,
+    bound_args: List(JsValue),
+  )
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -169,6 +179,13 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
       let kind_refs = case kind {
         FunctionObject(env: env_ref, func_index: _) -> [env_ref]
         NativeFunction(NativeErrorConstructor(proto: ref)) -> [ref]
+        NativeFunction(NativeBoundFunction(target:, bound_this:, bound_args:)) -> [
+          target,
+          ..list.flatten([
+            refs_in_value(bound_this),
+            list.flat_map(bound_args, refs_in_value),
+          ])
+        ]
         OrdinaryObject | ArrayObject(_) | NativeFunction(_) -> []
       }
       list.flatten([prop_refs, elem_refs, proto_refs, kind_refs])

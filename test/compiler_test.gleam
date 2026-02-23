@@ -1445,3 +1445,130 @@ pub fn class_no_constructor_test() {
     JsString("object"),
   )
 }
+
+// ============================================================================
+// Function.prototype.call / apply / bind
+// ============================================================================
+
+pub fn function_call_basic_test() {
+  assert_normal(
+    "function greet(x) { return this.prefix + x; }
+     var obj = { prefix: 'Hello ' };
+     greet.call(obj, 'world')",
+    JsString("Hello world"),
+  )
+}
+
+pub fn function_call_no_args_test() {
+  assert_normal(
+    "function getThis() { return this; }
+     getThis.call(42)",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn function_call_undefined_this_test() {
+  assert_normal(
+    "function f() { return typeof this; }
+     f.call(undefined)",
+    JsString("undefined"),
+  )
+}
+
+pub fn function_apply_basic_test() {
+  assert_normal(
+    "function add(a, b) { return a + b; }
+     add.apply(null, [3, 4])",
+    JsNumber(Finite(7.0)),
+  )
+}
+
+pub fn function_apply_with_this_test() {
+  assert_normal(
+    "function greet(x) { return this.prefix + x; }
+     var obj = { prefix: 'Hi ' };
+     greet.apply(obj, ['there'])",
+    JsString("Hi there"),
+  )
+}
+
+pub fn function_apply_no_args_test() {
+  assert_normal(
+    "function f() { return 42; }
+     f.apply(null)",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn function_bind_basic_test() {
+  assert_normal(
+    "function greet(x) { return this.name + ': ' + x; }
+     var obj = { name: 'Alice' };
+     var bound = greet.bind(obj);
+     bound('hello')",
+    JsString("Alice: hello"),
+  )
+}
+
+pub fn function_bind_with_args_test() {
+  assert_normal(
+    "function add(a, b) { return a + b; }
+     var add5 = add.bind(null, 5);
+     add5(3)",
+    JsNumber(Finite(8.0)),
+  )
+}
+
+pub fn function_bind_preserves_this_test() {
+  assert_normal(
+    "function getX() { return this.x; }
+     var obj = { x: 99 };
+     var bound = getX.bind(obj);
+     bound()",
+    JsNumber(Finite(99.0)),
+  )
+}
+
+pub fn function_bind_name_test() {
+  assert_normal(
+    "function foo() {} var b = foo.bind(null); b.name",
+    JsString("bound foo"),
+  )
+}
+
+pub fn function_bind_constructor_test() {
+  assert_normal(
+    "function Point(x, y) { this.x = x; this.y = y; }
+     var BoundPoint = Point.bind(null, 10);
+     var p = new BoundPoint(20);
+     p.x + p.y",
+    JsNumber(Finite(30.0)),
+  )
+}
+
+pub fn function_call_chained_test() {
+  // call on a method that was itself obtained via call
+  assert_normal(
+    "function add(a, b) { return a + b; }
+     var result = add.call(null, 10, 20);
+     result",
+    JsNumber(Finite(30.0)),
+  )
+}
+
+pub fn function_apply_empty_array_test() {
+  assert_normal(
+    "function f() { return 'ok'; }
+     f.apply(null, [])",
+    JsString("ok"),
+  )
+}
+
+pub fn function_bind_multiple_args_test() {
+  assert_normal(
+    "function sum(a, b, c) { return a + b + c; }
+     var bound = sum.bind(null, 1, 2);
+     bound(3)",
+    JsNumber(Finite(6.0)),
+  )
+}
