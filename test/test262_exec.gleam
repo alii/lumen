@@ -270,11 +270,14 @@ fn make_test262_globals(
     #("NaN", value.JsNumber(value.NaN)),
     #("Infinity", value.JsNumber(value.Infinity)),
     #("undefined", value.JsUndefined),
-    #("Error", value.JsObject(b.error_constructor)),
-    #("TypeError", value.JsObject(b.type_error_constructor)),
-    #("ReferenceError", value.JsObject(b.reference_error_constructor)),
-    #("RangeError", value.JsObject(b.range_error_constructor)),
-    #("SyntaxError", value.JsObject(b.syntax_error_constructor)),
+    #("Object", value.JsObject(b.object.constructor)),
+    #("Function", value.JsObject(b.function.constructor)),
+    #("Array", value.JsObject(b.array.constructor)),
+    #("Error", value.JsObject(b.error.constructor)),
+    #("TypeError", value.JsObject(b.type_error.constructor)),
+    #("ReferenceError", value.JsObject(b.reference_error.constructor)),
+    #("RangeError", value.JsObject(b.range_error.constructor)),
+    #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
   ])
 }
 

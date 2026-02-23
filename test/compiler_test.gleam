@@ -958,3 +958,102 @@ pub fn switch_string_cases_test() {
     JsString("is string"),
   )
 }
+
+// ============================================================================
+// Function .name property
+// ============================================================================
+
+pub fn function_declaration_name_test() {
+  assert_normal("function foo() {} foo.name", JsString("foo"))
+}
+
+pub fn function_expression_named_name_test() {
+  assert_normal("var f = function bar() {}; f.name", JsString("bar"))
+}
+
+pub fn function_expression_anonymous_name_test() {
+  assert_normal("var f = function() {}; f.name", JsString(""))
+}
+
+pub fn arrow_function_name_test() {
+  assert_normal("var f = () => 1; f.name", JsString(""))
+}
+
+// ============================================================================
+// .prototype.constructor backlink
+// ============================================================================
+
+pub fn prototype_constructor_backlink_test() {
+  assert_normal(
+    "function Foo() {}
+     Foo.prototype.constructor === Foo",
+    JsBool(True),
+  )
+}
+
+pub fn prototype_is_object_test() {
+  assert_normal(
+    "function Foo() {}
+     typeof Foo.prototype",
+    JsString("object"),
+  )
+}
+
+pub fn constructor_via_new_test() {
+  assert_normal(
+    "function Foo() {}
+     var o = new Foo();
+     o.constructor === Foo",
+    JsBool(True),
+  )
+}
+
+pub fn arrow_has_no_prototype_test() {
+  assert_normal(
+    "var f = () => 1;
+     typeof f.prototype",
+    JsString("undefined"),
+  )
+}
+
+pub fn constructor_return_object_overrides_test() {
+  // If constructor explicitly returns an object, that object is used
+  assert_normal(
+    "function Foo() { return {x: 99}; }
+     var o = new Foo();
+     o.x",
+    JsNumber(Finite(99.0)),
+  )
+}
+
+pub fn constructor_return_primitive_ignored_test() {
+  // If constructor returns a primitive, the constructed object is used
+  assert_normal(
+    "function Foo() { this.x = 42; return 5; }
+     var o = new Foo();
+     o.x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn prototype_chain_inheritance_test() {
+  // Properties set on prototype are accessible via the chain
+  assert_normal(
+    "function Foo() {}
+     Foo.prototype.hello = 'world';
+     var o = new Foo();
+     o.hello",
+    JsString("world"),
+  )
+}
+
+pub fn constructor_non_object_prototype_fallback_test() {
+  // When constructor.prototype is not an object, new instance gets Object.prototype
+  assert_normal(
+    "function Foo() { this.x = 1; }
+     Foo.prototype = 42;
+     var o = new Foo();
+     o.x",
+    JsNumber(Finite(1.0)),
+  )
+}

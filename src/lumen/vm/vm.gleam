@@ -6,6 +6,9 @@ import gleam/option.{None, Some}
 import gleam/order
 import gleam/string
 import lumen/vm/builtins.{type Builtins}
+import lumen/vm/builtins/array as builtins_array
+import lumen/vm/builtins/error as builtins_error
+import lumen/vm/builtins/object as builtins_object
 import lumen/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
 import lumen/vm/heap.{type Heap}
 import lumen/vm/object
@@ -22,7 +25,8 @@ import lumen/vm/opcode.{
 import lumen/vm/value.{
   type JsNum, type JsValue, type Ref, ArrayObject, Finite, FunctionObject,
   Infinity, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
-  JsUndefined, JsUninitialized, NaN, NegInfinity, ObjectSlot, OrdinaryObject,
+  JsUndefined, JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot,
+  OrdinaryObject,
 }
 
 // ============================================================================
@@ -133,7 +137,7 @@ pub fn run_with_globals(
       try_stack: [],
       finally_stack: [],
       builtins:,
-      closure_templates: builtins.constructor_templates,
+      closure_templates: dict.new(),
       this_binding: JsUndefined,
     )
   execute(state)
@@ -486,10 +490,16 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             })
           let #(heap, env_ref) =
             heap.alloc(state.heap, value.EnvSlot(captured_values))
+          // Set .name from the template
+          let fn_name = case child_template.name {
+            Some(n) -> JsString(n)
+            None -> JsString("")
+          }
           // For non-arrow functions, pre-populate .prototype with a fresh object
           // so that `Foo.prototype.bar = ...` and `new Foo()` work.
-          let #(heap, fn_properties) = case child_template.is_arrow {
-            True -> #(heap, dict.new())
+          // .constructor on prototype is set after we have the closure ref.
+          let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
+            True -> #(heap, dict.from_list([#("name", fn_name)]), None)
             False -> {
               let #(h, proto_obj_ref) =
                 heap.alloc(
@@ -498,10 +508,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     kind: OrdinaryObject,
                     properties: dict.new(),
                     elements: dict.new(),
-                    prototype: Some(state.builtins.object_prototype),
+                    prototype: Some(state.builtins.object.prototype),
                   ),
                 )
-              #(h, dict.from_list([#("prototype", JsObject(proto_obj_ref))]))
+              #(
+                h,
+                dict.from_list([
+                  #("prototype", JsObject(proto_obj_ref)),
+                  #("name", fn_name),
+                ]),
+                Some(proto_obj_ref),
+              )
             }
           }
           let #(heap, closure_ref) =
@@ -511,9 +528,32 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 kind: FunctionObject(func_index:, env: env_ref),
                 properties: fn_properties,
                 elements: dict.new(),
-                prototype: Some(state.builtins.function_prototype),
+                prototype: Some(state.builtins.function.prototype),
               ),
             )
+          // Set .constructor on the prototype pointing back to this function
+          let heap = case proto_ref {
+            Some(pr) ->
+              case heap.read(heap, pr) {
+                Ok(ObjectSlot(kind:, properties: props, elements:, prototype:)) ->
+                  heap.write(
+                    heap,
+                    pr,
+                    ObjectSlot(
+                      kind:,
+                      properties: dict.insert(
+                        props,
+                        "constructor",
+                        JsObject(closure_ref),
+                      ),
+                      elements:,
+                      prototype:,
+                    ),
+                  )
+                _ -> heap
+              }
+            None -> heap
+          }
           // Cache the template so it can be found when the closure is called
           // from a different scope (after the defining function has returned)
           let closure_templates =
@@ -620,18 +660,18 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 Ok(ObjectSlot(
                   kind: FunctionObject(func_index: _, env: env_ref),
                   ..,
-                )) -> {
+                )) ->
                   call_function(
                     state,
                     obj_ref,
                     env_ref,
                     args,
                     rest_stack,
-                    // Regular Call: this = undefined (or preserve for arrows)
                     JsUndefined,
                     None,
                   )
-                }
+                Ok(ObjectSlot(kind: NativeFunction(native), ..)) ->
+                  call_native(state, native, args, rest_stack, JsUndefined)
                 _ -> {
                   let #(heap, err) =
                     object.make_type_error(
@@ -786,7 +826,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             kind: OrdinaryObject,
             properties: dict.new(),
             elements: dict.new(),
-            prototype: Some(state.builtins.object_prototype),
+            prototype: Some(state.builtins.object.prototype),
           ),
         )
       Ok(
@@ -887,7 +927,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 kind: ArrayObject(count),
                 properties: dict.new(),
                 elements: elements_dict,
-                prototype: Some(state.builtins.array_prototype),
+                prototype: Some(state.builtins.array.prototype),
               ),
             )
           Ok(
@@ -1042,6 +1082,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     receiver,
                     None,
                   )
+                Ok(ObjectSlot(kind: NativeFunction(native), ..)) ->
+                  call_native(state, native, args, rest_stack, receiver)
                 _ -> {
                   let #(heap, err) =
                     object.make_type_error(
@@ -1094,7 +1136,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   // Read the constructor's .prototype property for the new object's __proto__
                   let proto = case dict.get(properties, "prototype") {
                     Ok(JsObject(proto_ref)) -> Some(proto_ref)
-                    _ -> Some(state.builtins.object_prototype)
+                    _ -> Some(state.builtins.object.prototype)
                   }
                   // Create the new object (the `this` for the constructor)
                   let #(heap, new_obj_ref) =
@@ -1119,6 +1161,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     Some(new_obj),
                   )
                 }
+                Ok(ObjectSlot(kind: NativeFunction(native), ..)) ->
+                  call_native(state, native, args, rest_stack, JsUndefined)
                 _ -> {
                   let #(heap, err) =
                     object.make_type_error(
@@ -1241,6 +1285,62 @@ fn call_function(
   }
 }
 
+/// Call a native (Gleam-implemented) function. No call frame is pushed —
+/// the native executes synchronously and pushes its result onto the stack.
+fn call_native(
+  state: State,
+  native: value.NativeFn,
+  args: List(JsValue),
+  rest_stack: List(JsValue),
+  this: JsValue,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  let #(heap, result) = dispatch_native(native, args, this, state)
+  case result {
+    Ok(return_value) ->
+      Ok(
+        State(
+          ..state,
+          heap:,
+          stack: [return_value, ..rest_stack],
+          pc: state.pc + 1,
+        ),
+      )
+    Error(thrown) -> Error(#(Thrown, thrown, heap))
+  }
+}
+
+/// Route a NativeFn call to the correct builtin module.
+fn dispatch_native(
+  native: value.NativeFn,
+  args: List(JsValue),
+  this: JsValue,
+  state: State,
+) -> #(Heap, Result(JsValue, JsValue)) {
+  case native {
+    value.NativeObjectConstructor ->
+      builtins_object.call_native(
+        args,
+        this,
+        state.heap,
+        state.builtins.object.prototype,
+      )
+    value.NativeFunctionConstructor -> {
+      let #(heap, err) =
+        object.make_type_error(
+          state.heap,
+          state.builtins,
+          "Function constructor is not supported",
+        )
+      #(heap, Error(err))
+    }
+    value.NativeArrayConstructor ->
+      builtins_array.construct(args, state.heap, state.builtins.array.prototype)
+    value.NativeArrayIsArray -> builtins_array.is_array(args, state.heap)
+    value.NativeErrorConstructor(proto:) ->
+      builtins_error.call_native(proto, args, this, state.heap)
+  }
+}
+
 /// Pop n items from stack. Returns #(popped_items_in_order, remaining_stack).
 fn pop_n(
   stack: List(JsValue),
@@ -1307,7 +1407,7 @@ fn get_elem_value(heap: Heap, ref: value.Ref, key: JsValue) -> JsValue {
                 }
               }
           }
-        OrdinaryObject | FunctionObject(..) -> {
+        OrdinaryObject | FunctionObject(..) | NativeFunction(_) -> {
           let key_str = to_js_string(key)
           case object.get_property(heap, ref, key_str) {
             Ok(val) -> val
@@ -1362,7 +1462,7 @@ fn put_elem_value(
               )
             }
           }
-        OrdinaryObject | FunctionObject(..) -> {
+        OrdinaryObject | FunctionObject(..) | NativeFunction(_) -> {
           let key_str = to_js_string(key)
           object.set_property(heap, ref, key_str, val)
         }
@@ -1407,6 +1507,7 @@ fn typeof_value(val: JsValue, heap: Heap) -> String {
     JsObject(ref) ->
       case heap.read(heap, ref) {
         Ok(ObjectSlot(kind: FunctionObject(..), ..)) -> "function"
+        Ok(ObjectSlot(kind: NativeFunction(_), ..)) -> "function"
         _ -> "object"
       }
   }
@@ -1676,32 +1777,9 @@ fn to_number(val: JsValue) -> Result(JsNum, String) {
   }
 }
 
-/// JS ToString (simplified): https://tc39.es/ecma262/#sec-tostring
+/// JS ToString — delegates to value.to_js_string.
 fn to_js_string(val: JsValue) -> String {
-  case val {
-    JsUndefined -> "undefined"
-    JsNull -> "null"
-    JsBool(True) -> "true"
-    JsBool(False) -> "false"
-    JsNumber(Finite(n)) -> js_format_number(n)
-    JsNumber(NaN) -> "NaN"
-    JsNumber(Infinity) -> "Infinity"
-    JsNumber(NegInfinity) -> "-Infinity"
-    JsString(s) -> s
-    JsBigInt(value.BigInt(n)) -> int.to_string(n)
-    JsSymbol(_) -> "Symbol()"
-    JsObject(_) -> "[object Object]"
-    JsUninitialized -> "undefined"
-  }
-}
-
-/// Format a JS number as a string. Integer-valued floats omit the decimal.
-fn js_format_number(n: Float) -> String {
-  let truncated = float.truncate(n)
-  case int.to_float(truncated) == n {
-    True -> int.to_string(truncated)
-    False -> float.to_string(n)
-  }
+  value.to_js_string(val)
 }
 
 /// JS instanceof operator.

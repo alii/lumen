@@ -5,7 +5,7 @@ import lumen/vm/builtins.{type Builtins}
 import lumen/vm/heap.{type Heap}
 import lumen/vm/value.{
   type JsValue, type Ref, ArrayObject, Finite, FunctionObject, JsNumber,
-  JsObject, JsString, ObjectSlot, OrdinaryObject,
+  JsObject, JsString, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 
 /// Walk the prototype chain to find a property by key.
@@ -34,8 +34,8 @@ pub fn get_property(heap: Heap, ref: Ref, key: String) -> Result(JsValue, Nil) {
                   }
               }
           }
-        OrdinaryObject | FunctionObject(..) ->
-          // Ordinary object / function: check properties, then prototype chain
+        OrdinaryObject | FunctionObject(..) | NativeFunction(_) ->
+          // Ordinary object / function / native: check properties, then prototype chain
           case dict.get(properties, key) {
             Ok(val) -> Ok(val)
             Error(_) -> walk_prototype(heap, prototype, key)
@@ -93,7 +93,7 @@ pub fn set_property(heap: Heap, ref: Ref, key: String, val: JsValue) -> Heap {
               )
             }
           }
-        OrdinaryObject | FunctionObject(..) -> {
+        OrdinaryObject | FunctionObject(..) | NativeFunction(_) -> {
           let new_props = dict.insert(properties, key, val)
           heap.write(
             heap,
@@ -112,7 +112,7 @@ pub fn make_type_error(
   b: Builtins,
   message: String,
 ) -> #(Heap, JsValue) {
-  make_error(h, b.type_error_prototype, message)
+  make_error(h, b.type_error.prototype, message)
 }
 
 /// Create a ReferenceError instance on the heap.
@@ -121,7 +121,7 @@ pub fn make_reference_error(
   b: Builtins,
   message: String,
 ) -> #(Heap, JsValue) {
-  make_error(h, b.reference_error_prototype, message)
+  make_error(h, b.reference_error.prototype, message)
 }
 
 /// Create a RangeError instance on the heap.
@@ -130,7 +130,7 @@ pub fn make_range_error(
   b: Builtins,
   message: String,
 ) -> #(Heap, JsValue) {
-  make_error(h, b.range_error_prototype, message)
+  make_error(h, b.range_error.prototype, message)
 }
 
 /// Create a SyntaxError instance on the heap.
@@ -139,7 +139,7 @@ pub fn make_syntax_error(
   b: Builtins,
   message: String,
 ) -> #(Heap, JsValue) {
-  make_error(h, b.syntax_error_prototype, message)
+  make_error(h, b.syntax_error.prototype, message)
 }
 
 /// Internal helper — allocates an error object with the given prototype and message.

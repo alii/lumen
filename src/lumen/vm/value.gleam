@@ -1,4 +1,6 @@
 import gleam/dict.{type Dict}
+import gleam/float
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -46,6 +48,16 @@ pub type JsValue {
   JsUninitialized
 }
 
+/// Identifies a built-in native function. Used by `NativeFunction` to dispatch
+/// to the correct Gleam implementation when called from JS.
+pub type NativeFn {
+  NativeObjectConstructor
+  NativeFunctionConstructor
+  NativeArrayConstructor
+  NativeArrayIsArray
+  NativeErrorConstructor(proto: Ref)
+}
+
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
 pub type ExoticKind {
   /// Plain JS object: `{}`, `new Object()`, error instances, prototypes, etc.
@@ -55,6 +67,9 @@ pub type ExoticKind {
   /// JS function (closure). `func_index` identifies the bytecode template,
   /// `env` points to the EnvSlot holding captured variables.
   FunctionObject(func_index: Int, env: Ref)
+  /// Built-in function implemented in Gleam, not bytecode.
+  /// Callable like any function but dispatches to native code.
+  NativeFunction(native: NativeFn)
 }
 
 /// What lives in a heap slot.
@@ -111,11 +126,42 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
       }
       let kind_refs = case kind {
         FunctionObject(env: env_ref, func_index: _) -> [env_ref]
-        OrdinaryObject | ArrayObject(_) -> []
+        NativeFunction(NativeErrorConstructor(proto: ref)) -> [ref]
+        OrdinaryObject | ArrayObject(_) | NativeFunction(_) -> []
       }
       list.flatten([prop_refs, elem_refs, proto_refs, kind_refs])
     }
     EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
     BoxSlot(value:) -> refs_in_value(value)
+  }
+}
+
+/// Convert a JsValue to its JS string representation (ToString abstract op).
+/// Note: for objects this returns "[object Object]" — proper toString/valueOf
+/// dispatch requires heap access and should be done at the call site.
+pub fn to_js_string(val: JsValue) -> String {
+  case val {
+    JsUndefined -> "undefined"
+    JsNull -> "null"
+    JsBool(True) -> "true"
+    JsBool(False) -> "false"
+    JsNumber(Finite(n)) -> js_format_number(n)
+    JsNumber(NaN) -> "NaN"
+    JsNumber(Infinity) -> "Infinity"
+    JsNumber(NegInfinity) -> "-Infinity"
+    JsString(s) -> s
+    JsBigInt(BigInt(n)) -> int.to_string(n)
+    JsSymbol(_) -> "Symbol()"
+    JsObject(_) -> "[object Object]"
+    JsUninitialized -> "undefined"
+  }
+}
+
+/// Format a JS number as a string. Integer-valued floats omit the decimal.
+pub fn js_format_number(n: Float) -> String {
+  let truncated = float.truncate(n)
+  case int.to_float(truncated) == n {
+    True -> int.to_string(truncated)
+    False -> float.to_string(n)
   }
 }
