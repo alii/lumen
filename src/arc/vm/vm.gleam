@@ -1,19 +1,12 @@
-import gleam/dict
-import gleam/float
-import gleam/int
-import gleam/list
-import gleam/option.{None, Some}
-import gleam/order
-import gleam/string
-import lumen/vm/builtins.{type Builtins}
-import lumen/vm/builtins/array as builtins_array
-import lumen/vm/builtins/error as builtins_error
-import lumen/vm/builtins/math as builtins_math
-import lumen/vm/builtins/object as builtins_object
-import lumen/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
-import lumen/vm/heap.{type Heap}
-import lumen/vm/object
-import lumen/vm/opcode.{
+import arc/vm/builtins.{type Builtins}
+import arc/vm/builtins/array as builtins_array
+import arc/vm/builtins/error as builtins_error
+import arc/vm/builtins/math as builtins_math
+import arc/vm/builtins/object as builtins_object
+import arc/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
+import arc/vm/heap.{type Heap}
+import arc/vm/object
+import arc/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
   BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallConstructor,
   CallMethod, DefineField, DefineMethod, DeleteElem, DeleteField, Div, Dup, Eq,
@@ -25,12 +18,19 @@ import lumen/vm/opcode.{
   ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
   UShiftRight, UnaryOp, Void,
 }
-import lumen/vm/value.{
+import arc/vm/value.{
   type JsNum, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject,
   DataProperty, Finite, ForInIteratorSlot, FunctionObject, Infinity, JsBigInt,
   JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined,
   JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
 }
+import gleam/dict
+import gleam/float
+import gleam/int
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/order
+import gleam/string
 
 // ============================================================================
 // Public types
@@ -2606,5 +2606,5 @@ fn num_to_int32(n: JsNum) -> Int {
 // Float helpers — only power needs FFI now
 // ============================================================================
 
-@external(erlang, "lumen_vm_ffi", "float_power")
+@external(erlang, "arc_vm_ffi", "float_power")
 fn float_power(base: Float, exp: Float) -> Float

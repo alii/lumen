@@ -1,15 +1,15 @@
+import arc/vm/builtins.{type Builtins}
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
+  type JsValue, type Property, type Ref, ArrayObject, DataProperty, Finite,
+  FunctionObject, JsNumber, JsObject, JsString, NativeFunction, ObjectSlot,
+  OrdinaryObject,
+}
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
-import lumen/vm/builtins.{type Builtins}
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
-  type JsValue, type Property, type Ref, ArrayObject, DataProperty, Finite,
-  FunctionObject, JsNumber, JsObject, JsString, NativeFunction, ObjectSlot,
-  OrdinaryObject,
-}
 
 /// Walk the prototype chain to find a property by key.
 /// Checks own properties first, then follows the prototype link.

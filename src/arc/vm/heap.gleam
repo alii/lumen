@@ -1,8 +1,8 @@
+import arc/erlang
+import arc/vm/value.{type HeapSlot, type Ref, Ref}
 import gleam/dict
 import gleam/list
 import gleam/set.{type Set}
-import lumen/erlang
-import lumen/vm/value.{type HeapSlot, type Ref, Ref}
 
 /// Stats returned by the stats() function for introspection.
 pub type HeapStats {

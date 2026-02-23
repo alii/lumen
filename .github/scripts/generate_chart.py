@@ -106,7 +106,7 @@ def generate_chart(history):
     # Title with latest stats
     latest = history[-1]
     ax1.set_title(
-        f"Lumen test262 Conformance: {latest['percent']}% "
+        f"Arc test262 Conformance: {latest['percent']}% "
         f"({latest['pass']:,} / {latest['tested']:,} tests)",
         fontsize=14,
         fontweight="bold",

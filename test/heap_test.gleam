@@ -1,12 +1,12 @@
-import gleam/dict
-import gleam/option.{None}
-import gleam/set
-import lumen/vm/heap
-import lumen/vm/value.{
+import arc/vm/heap
+import arc/vm/value.{
   ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FunctionObject, JsBigInt,
   JsNull, JsNumber, JsObject, JsString, JsSymbol, ObjectSlot, OrdinaryObject,
   Ref, SymbolId,
 }
+import gleam/dict
+import gleam/option.{None}
+import gleam/set
 
 fn ordinary(props: dict.Dict(String, value.JsValue)) {
   ObjectSlot(

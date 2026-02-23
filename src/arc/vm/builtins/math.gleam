@@ -1,11 +1,11 @@
-import gleam/dict
-import gleam/int
-import gleam/option.{Some}
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
   type JsValue, type Ref, Finite, Infinity, JsNumber, JsObject, JsString, NaN,
   NativeFunction, NativeMathPow, NegInfinity, ObjectSlot, OrdinaryObject,
 }
+import gleam/dict
+import gleam/int
+import gleam/option.{Some}
 
 /// Set up the Math global object.
 /// Math is NOT a constructor — it's a plain object with static methods.
@@ -71,7 +71,7 @@ fn to_number(val: JsValue) -> value.JsNum {
   }
 }
 
-@external(erlang, "lumen_vm_ffi", "float_power")
+@external(erlang, "arc_vm_ffi", "float_power")
 fn float_power(base: Float, exp: Float) -> Float
 
 /// Exponentiation with special-value handling (mirrors vm.gleam's num_exp).

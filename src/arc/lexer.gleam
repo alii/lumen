@@ -1,4 +1,4 @@
-/// JavaScript lexer for Lumen.
+/// JavaScript lexer for Arc.
 /// Converts source text into a stream of tokens.
 /// Operates on raw bytes (UTF-8) for O(1) character access.
 import gleam/bit_array

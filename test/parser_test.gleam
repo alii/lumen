@@ -1,9 +1,9 @@
 /// Test262 parser conformance tests.
 /// Each test262 .js file becomes an individual EUnit test descriptor,
 /// so the output shows real pass/fail counts per file.
+import arc/parser
 import gleam/list
 import gleam/string
-import lumen/parser
 import test_runner
 
 /// Tests in the fail/ directory that are outdated due to spec changes.

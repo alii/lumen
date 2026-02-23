@@ -1,5 +1,5 @@
+import arc/vm/value.{type JsValue}
 import gleam/option.{type Option}
-import lumen/vm/value.{type JsValue}
 
 // ============================================================================
 // Final Bytecode — resolved, ready for VM execution

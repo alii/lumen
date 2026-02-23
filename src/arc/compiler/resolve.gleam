@@ -4,10 +4,7 @@
 /// Two-pass algorithm:
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
-import gleam/dict.{type Dict}
-import gleam/list
-import gleam/option.{type Option}
-import lumen/vm/opcode.{
+import arc/vm/opcode.{
   type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrBinOp,
   IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod, IrCloseVar,
   IrDefineAccessor, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
@@ -20,7 +17,10 @@ import lumen/vm/opcode.{
   IrReturn, IrRot3, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
   IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
 }
-import lumen/vm/value.{type JsValue}
+import arc/vm/value.{type JsValue}
+import gleam/dict.{type Dict}
+import gleam/list
+import gleam/option.{type Option}
 
 /// Resolve a list of IrOps into a FuncTemplate.
 /// The IrOps must have all scope markers already consumed (by Phase 2).

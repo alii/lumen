@@ -3,12 +3,8 @@
 /// Walks the AST and produces a list of EmitterOps — symbolic IR instructions
 /// mixed with scope markers. Variable references use string names (IrScopeGetVar),
 /// jump targets use integer label IDs (IrJump). These are resolved in Phase 2 and 3.
-import gleam/dict.{type Dict}
-import gleam/int
-import gleam/list
-import gleam/option.{type Option, None, Some}
-import lumen/ast
-import lumen/vm/opcode.{
+import arc/ast
+import arc/vm/opcode.{
   type IrOp, IrArrayFrom, IrBinOp, IrCallConstructor, IrCallMethod,
   IrDefineField, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
   IrForInStart, IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetIterator,
@@ -17,9 +13,13 @@ import lumen/vm/opcode.{
   IrPushConst, IrPushTry, IrPutElem, IrPutField, IrReturn, IrScopeGetVar,
   IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
 }
-import lumen/vm/value.{
+import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
 }
+import gleam/dict.{type Dict}
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
 
 // ============================================================================
 // Types

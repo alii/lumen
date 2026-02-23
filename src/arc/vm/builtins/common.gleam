@@ -1,9 +1,9 @@
-import gleam/dict.{type Dict}
-import gleam/option.{type Option}
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
   type Property, type Ref, JsObject, ObjectSlot, OrdinaryObject,
 }
+import gleam/dict.{type Dict}
+import gleam/option.{type Option}
 
 /// A prototype + constructor pair. Every JS builtin type has both.
 pub type BuiltinType {

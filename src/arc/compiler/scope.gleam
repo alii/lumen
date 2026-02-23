@@ -8,21 +8,21 @@
 /// Variables captured by child closures are "boxed" — stored in a heap-allocated
 /// BoxSlot. Both the parent and child dereference through the same box, so
 /// mutations are visible in both directions (true JS closure semantics).
-import gleam/dict.{type Dict}
-import gleam/list
-import gleam/option.{type Option, None, Some}
-import gleam/set.{type Set}
-import lumen/compiler/emit.{
+import arc/compiler/emit.{
   type BindingKind, type EmitterOp, BlockScope, CaptureBinding, CatchBinding,
   ConstBinding, DeclareVar, EnterScope, FunctionScope, Ir, LeaveScope,
   LetBinding, ParamBinding, VarBinding,
 }
-import lumen/vm/opcode.{
+import arc/vm/opcode.{
   type IrOp, IrBoxLocal, IrGetBoxed, IrGetGlobal, IrGetLocal, IrPushConst,
   IrPutBoxed, IrPutGlobal, IrPutLocal, IrScopeGetVar, IrScopePutVar,
   IrScopeTypeofVar, IrTypeOf, IrTypeofGlobal,
 }
-import lumen/vm/value.{type JsValue, JsUndefined, JsUninitialized}
+import arc/vm/value.{type JsValue, JsUndefined, JsUninitialized}
+import gleam/dict.{type Dict}
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/set.{type Set}
 
 // ============================================================================
 // Types

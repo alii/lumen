@@ -1,13 +1,13 @@
-import gleam/dict
-import gleam/option.{Some}
-import lumen/vm/builtins/common.{
+import arc/vm/builtins/common.{
   type BuiltinType, BuiltinType, alloc_proto, set_constructor,
 }
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
   type JsValue, type Ref, JsObject, JsString, JsUndefined,
   NativeErrorConstructor, NativeFunction, ObjectSlot, OrdinaryObject,
 }
+import gleam/dict
+import gleam/option.{Some}
 
 /// All error-related builtin types.
 pub type ErrorBuiltins {

@@ -1,4 +1,4 @@
--module(lumen_vm_ffi).
+-module(arc_vm_ffi).
 -export([float_power/2]).
 
 float_power(Base, Exp) ->

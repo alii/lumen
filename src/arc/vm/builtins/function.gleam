@@ -1,13 +1,13 @@
-import gleam/dict
-import gleam/option.{Some}
-import lumen/vm/builtins/common.{
+import arc/vm/builtins/common.{
   type BuiltinType, BuiltinType, alloc_proto, set_constructor,
 }
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
   type Ref, JsObject, JsString, NativeFunction, NativeFunctionApply,
   NativeFunctionBind, NativeFunctionCall, NativeFunctionConstructor, ObjectSlot,
 }
+import gleam/dict
+import gleam/option.{Some}
 
 /// Set up Function.prototype and Function constructor.
 pub fn init(h: Heap, object_proto: Ref) -> #(Heap, BuiltinType) {

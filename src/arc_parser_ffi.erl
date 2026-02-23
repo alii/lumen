@@ -1,4 +1,4 @@
--module(lumen_parser_ffi).
+-module(arc_parser_ffi).
 -export([parse_float/1]).
 
 parse_float(S) ->

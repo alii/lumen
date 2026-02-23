@@ -1,12 +1,8 @@
-# lumen
+# arc
 
 (Highly experimental) JavaScript on the BEAM
 
-## test262 Conformance
-
 ![test262 conformance chart](.github/test262/conformance.png)
-
-Conformance is measured daily against the full [test262](https://github.com/nicolo-ribaudo/tc39-test262) suite by compiling and executing each test through lumen's parser, compiler, and VM.
 
 ## Development
 

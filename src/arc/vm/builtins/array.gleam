@@ -1,18 +1,18 @@
+import arc/vm/builtins/common.{
+  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
+}
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
+  type JsValue, type Ref, ArrayObject, JsBool, JsNull, JsNumber, JsObject,
+  JsString, JsUndefined, NativeArrayConstructor, NativeArrayIsArray,
+  NativeArrayPrototypeJoin, NativeArrayPrototypePush, NativeFunction, ObjectSlot,
+}
 import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{Some}
 import gleam/string
-import lumen/vm/builtins/common.{
-  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
-}
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
-  type JsValue, type Ref, ArrayObject, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined, NativeArrayConstructor, NativeArrayIsArray,
-  NativeArrayPrototypeJoin, NativeArrayPrototypePush, NativeFunction, ObjectSlot,
-}
 
 /// Set up Array.prototype and Array constructor.
 pub fn init(

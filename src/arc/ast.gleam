@@ -1,4 +1,4 @@
-/// Core AST types for the Lumen JavaScript parser.
+/// Core AST types for the Arc JavaScript parser.
 /// Based on the ESTree specification, adapted for Gleam's type system.
 import gleam/option.{type Option}
 

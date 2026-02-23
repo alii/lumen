@@ -6,18 +6,18 @@
 /// Usage:
 ///   TEST262_EXEC=1 gleam test         — run execution tests, output results
 ///   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
+import arc/compiler
+import arc/parser
+import arc/vm/builtins
+import arc/vm/heap
+import arc/vm/value
+import arc/vm/vm
 import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
-import lumen/compiler
-import lumen/parser
-import lumen/vm/builtins
-import lumen/vm/heap
-import lumen/vm/value
-import lumen/vm/vm
 import simplifile
 import test262_metadata.{type TestMetadata, Parse, Resolution, Runtime}
 import test_runner

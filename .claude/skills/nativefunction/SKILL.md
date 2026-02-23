@@ -5,7 +5,7 @@ description: Implement a new JavaScript native/builtin function (e.g. Array.from
 
 # /nativefunction — Implement a JS native function
 
-Implement a new JavaScript built-in/native function in the Lumen runtime.
+Implement a new JavaScript built-in/native function in the Arc runtime.
 
 The user will specify the function, e.g. `/nativefunction Array.from` or `/nativefunction String.prototype.trim`.
 
@@ -28,7 +28,7 @@ Summarize the key semantics, edge cases, and spec requirements before proceeding
 
 Touch these files in order:
 
-### 1. `src/lumen/vm/value.gleam` — Add NativeFn variant
+### 1. `src/arc/vm/value.gleam` — Add NativeFn variant
 
 Add a new variant to the `NativeFn` type. Naming convention:
 
@@ -46,7 +46,7 @@ pub type NativeFn {
 
 No other changes needed in value.gleam — these are plain tag variants with no GC implications.
 
-### 2. `src/lumen/vm/builtins/<module>.gleam` — Implement the function
+### 2. `src/arc/vm/builtins/<module>.gleam` — Implement the function
 
 Find the correct builtin module (or create a new one if needed):
 
@@ -108,15 +108,15 @@ fn alloc_native_fn(h, function_proto, native, name, length) -> #(Heap, Ref)
 fn add_method(h, obj_ref, name, fn_ref) -> Heap
 ```
 
-### 3. `src/lumen/vm/builtins.gleam` — Wire new modules (if creating new builtin)
+### 3. `src/arc/vm/builtins.gleam` — Wire new modules (if creating new builtin)
 
 Only needed when adding a NEW global object (like Math, Map, Set). For methods on existing prototypes (Array.prototype.map), skip this step.
 
-- Add `import lumen/vm/builtins/<new_module>`
+- Add `import arc/vm/builtins/<new_module>`
 - Add field to `Builtins` type (e.g. `math: Ref` for object globals, or `BuiltinType` for constructor+prototype pairs)
 - Call init in `builtins.init()`
 
-### 4. `src/lumen/vm/vm.gleam` — Add dispatch case
+### 4. `src/arc/vm/vm.gleam` — Add dispatch case
 
 Add a case to `dispatch_native()`:
 

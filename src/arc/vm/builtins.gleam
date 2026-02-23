@@ -1,13 +1,13 @@
+import arc/vm/builtins/array as builtins_array
+import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/builtins/error as builtins_error
+import arc/vm/builtins/function as builtins_function
+import arc/vm/builtins/math as builtins_math
+import arc/vm/builtins/object as builtins_object
+import arc/vm/heap.{type Heap}
+import arc/vm/value
 import gleam/dict
 import gleam/option.{None}
-import lumen/vm/builtins/array as builtins_array
-import lumen/vm/builtins/common.{type BuiltinType}
-import lumen/vm/builtins/error as builtins_error
-import lumen/vm/builtins/function as builtins_function
-import lumen/vm/builtins/math as builtins_math
-import lumen/vm/builtins/object as builtins_object
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value
 
 /// Pre-allocated prototype objects and constructor functions for JS built-ins.
 /// All refs are rooted so GC never collects them.

@@ -1,14 +1,14 @@
+import arc/compiler
+import arc/parser
+import arc/vm/builtins
+import arc/vm/heap
+import arc/vm/value.{
+  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
+}
+import arc/vm/vm
 import gleam/dict
 import gleam/int
 import gleam/string
-import lumen/compiler
-import lumen/parser
-import lumen/vm/builtins
-import lumen/vm/heap
-import lumen/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
-}
-import lumen/vm/vm
 
 // ============================================================================
 // Test helpers

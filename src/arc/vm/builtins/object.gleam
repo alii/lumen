@@ -1,10 +1,6 @@
-import gleam/dict
-import gleam/int
-import gleam/list
-import gleam/option.{Some}
-import lumen/vm/builtins/common.{type BuiltinType, BuiltinType, set_constructor}
-import lumen/vm/heap.{type Heap}
-import lumen/vm/value.{
+import arc/vm/builtins/common.{type BuiltinType, BuiltinType, set_constructor}
+import arc/vm/heap.{type Heap}
+import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, JsBool, JsNull, JsNumber,
   JsObject, JsString, JsUndefined, NativeFunction, NativeObjectConstructor,
   NativeObjectDefineProperty, NativeObjectGetOwnPropertyDescriptor,
@@ -12,6 +8,10 @@ import lumen/vm/value.{
   NativeObjectPrototypeHasOwnProperty, NativeObjectPrototypePropertyIsEnumerable,
   ObjectSlot, OrdinaryObject,
 }
+import gleam/dict
+import gleam/int
+import gleam/list
+import gleam/option.{Some}
 
 /// Set up Object constructor and Object.prototype methods.
 /// Object.prototype is already allocated (it's the root of all chains).

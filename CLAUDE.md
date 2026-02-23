@@ -1,4 +1,4 @@
-# Lumen — JavaScript Runtime Prior Art
+# Arc — JavaScript Runtime Prior Art
 
 **CRITICAL**: When implementing any JavaScript runtime feature, you MUST study prior art from existing JS engines before writing code. There is an enormous amount of prior work to learn from:
 

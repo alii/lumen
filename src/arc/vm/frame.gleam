@@ -1,6 +1,6 @@
+import arc/vm/opcode.{type FuncTemplate, type Op}
+import arc/vm/value.{type JsValue, type Ref}
 import gleam/option.{type Option}
-import lumen/vm/opcode.{type FuncTemplate, type Op}
-import lumen/vm/value.{type JsValue, type Ref}
 
 /// A single call frame on the VM call stack.
 pub type CallFrame {

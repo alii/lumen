@@ -1,17 +1,10 @@
-/// JavaScript parser for Lumen.
+/// JavaScript parser for Arc.
 /// Recursive descent parser for ES2023+ strict mode JavaScript.
 ///
 /// The parser consumes a token list and validates syntax.
 /// Uses Pratt parsing for expression precedence.
-import gleam/bit_array
-import gleam/bool
-import gleam/int
-import gleam/list
-import gleam/option.{type Option, None, Some}
-import gleam/result
-import gleam/string
-import lumen/ast
-import lumen/lexer.{
+import arc/ast
+import arc/lexer.{
   type Token, type TokenKind, Ampersand, AmpersandAmpersand,
   AmpersandAmpersandEqual, AmpersandEqual, Arrow, As, Async, Await, Bang,
   BangEqual, BangEqualEqual, Break, Caret, CaretEqual, Case, Catch, Class, Colon,
@@ -29,6 +22,13 @@ import lumen/lexer.{
   StarStar, StarStarEqual, Static, Super, Switch, TemplateLiteral, This, Throw,
   Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
 }
+import gleam/bit_array
+import gleam/bool
+import gleam/int
+import gleam/list
+import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
 
 pub type ParseMode {
   Script
@@ -3922,8 +3922,8 @@ fn gleam_float_parse(s: String) -> Result(Float, Nil) {
   }
 }
 
-@external(erlang, "lumen_parser_ffi", "parse_float")
-@external(javascript, "../lumen_parser_ffi.mjs", "parse_float")
+@external(erlang, "arc_parser_ffi", "parse_float")
+@external(javascript, "../arc_parser_ffi.mjs", "parse_float")
 fn catch_float_parse(s: String) -> Result(Float, Nil)
 
 fn gleam_int_parse(s: String) -> Result(Int, Nil) {

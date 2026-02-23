@@ -1,18 +1,18 @@
-import gleam/option.{None}
-import lumen/vm/builtins
-import lumen/vm/heap
-import lumen/vm/object
-import lumen/vm/opcode.{
+import arc/vm/builtins
+import arc/vm/heap
+import arc/vm/object
+import arc/vm/opcode.{
   type FuncTemplate, type Op, Add, BinOp, BitAnd, BitNot, BitOr, BitXor,
   DefineField, Div, Dup, Eq, Exp, FuncTemplate, GetField, GetLocal, Gt, GtEq,
   Jump, JumpIfFalse, JumpIfTrue, LogicalNot, Lt, LtEq, Mod, Mul, Neg, NewObject,
   NotEq, Pop, Pos, PushConst, PushTry, PutField, PutLocal, Return, ShiftLeft,
   ShiftRight, StrictEq, StrictNotEq, Sub, Swap, UShiftRight, UnaryOp, Void,
 }
-import lumen/vm/value.{
+import arc/vm/value.{
   Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
 }
-import lumen/vm/vm
+import arc/vm/vm
+import gleam/option.{None}
 
 fn make_func(
   bytecode: List(Op),

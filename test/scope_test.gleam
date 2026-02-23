@@ -1,4 +1,4 @@
-import lumen/parser
+import arc/parser
 
 fn should_fail(source: String) -> Bool {
   case parser.parse(source, parser.Script) {

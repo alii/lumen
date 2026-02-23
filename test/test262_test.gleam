@@ -6,13 +6,13 @@
 /// Usage:
 ///   TEST262=1 gleam test          — run test262 with snapshot
 ///   GENERATE_SNAPSHOT=1 gleam test — regenerate snapshot file
+import arc/parser
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{Some}
 import gleam/set
 import gleam/string
-import lumen/parser
 import simplifile
 import test262_metadata.{type TestMetadata, Parse}
 import test262_snapshot
