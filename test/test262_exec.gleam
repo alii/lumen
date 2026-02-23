@@ -279,6 +279,13 @@ fn make_test262_globals(
     #("RangeError", value.JsObject(b.range_error.constructor)),
     #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
     #("Math", value.JsObject(b.math)),
+    #("String", value.JsObject(b.string.constructor)),
+    #("Number", value.JsObject(b.number.constructor)),
+    #("Boolean", value.JsObject(b.boolean.constructor)),
+    #("parseInt", value.JsObject(b.parse_int)),
+    #("parseFloat", value.JsObject(b.parse_float)),
+    #("isNaN", value.JsObject(b.is_nan)),
+    #("isFinite", value.JsObject(b.is_finite)),
   ])
 }
 

@@ -113,6 +113,21 @@ pub type NativeFn {
   NativeStringPrototypePadStart
   NativeStringPrototypePadEnd
   NativeStringPrototypeAt
+  // String/Number/Boolean constructors (type coercion functions)
+  NativeStringConstructor
+  NativeNumberConstructor
+  NativeBooleanConstructor
+  // Global utility functions (these coerce via ToNumber first)
+  NativeParseInt
+  NativeParseFloat
+  NativeIsNaN
+  NativeIsFinite
+  // Number static methods (strict — NO coercion)
+  NativeNumberIsNaN
+  NativeNumberIsFinite
+  NativeNumberIsInteger
+  NativeNumberParseInt
+  NativeNumberParseFloat
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.

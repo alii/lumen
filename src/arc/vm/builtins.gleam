@@ -1,8 +1,10 @@
 import arc/vm/builtins/array as builtins_array
+import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/math as builtins_math
+import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/string as builtins_string
 import arc/vm/heap.{type Heap}
@@ -23,7 +25,13 @@ pub type Builtins {
     range_error: BuiltinType,
     syntax_error: BuiltinType,
     math: value.Ref,
-    string_proto: value.Ref,
+    string: BuiltinType,
+    number: BuiltinType,
+    boolean: BuiltinType,
+    parse_int: value.Ref,
+    parse_float: value.Ref,
+    is_nan: value.Ref,
+    is_finite: value.Ref,
   )
 }
 
@@ -54,9 +62,15 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Math global object
   let #(h, math) = builtins_math.init(h, object_proto, function.prototype)
 
-  // String.prototype (for primitive property access)
-  let #(h, string_proto) =
-    builtins_string.init(h, object_proto, function.prototype)
+  // String constructor + prototype
+  let #(h, string) = builtins_string.init(h, object_proto, function.prototype)
+
+  // Number constructor + prototype + global utility functions
+  let #(h, number, parse_int, parse_float, is_nan, is_finite) =
+    builtins_number.init(h, object_proto, function.prototype)
+
+  // Boolean constructor + prototype
+  let #(h, boolean) = builtins_boolean.init(h, object_proto, function.prototype)
 
   #(
     h,
@@ -70,7 +84,13 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       range_error: errors.range_error,
       syntax_error: errors.syntax_error,
       math:,
-      string_proto:,
+      string:,
+      number:,
+      boolean:,
+      parse_int:,
+      parse_float:,
+      is_nan:,
+      is_finite:,
     ),
   )
 }

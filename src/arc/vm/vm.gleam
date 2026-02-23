@@ -1,7 +1,9 @@
 import arc/vm/builtins.{type Builtins}
 import arc/vm/builtins/array as builtins_array
+import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/math as builtins_math
+import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/string as builtins_string
 import arc/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
@@ -933,7 +935,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         }
         [JsString(s), ..rest] -> {
           let val =
-            get_string_field(s, name, state.heap, state.builtins.string_proto)
+            get_string_field(
+              s,
+              name,
+              state.heap,
+              state.builtins.string.prototype,
+            )
           Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
         }
         [_, ..rest] -> {
@@ -1058,7 +1065,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         }
         [key, JsString(s), ..rest] -> {
           let val =
-            get_string_elem(s, key, state.heap, state.builtins.string_proto)
+            get_string_elem(s, key, state.heap, state.builtins.string.prototype)
           Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
         }
         [_, _, ..rest] -> {
@@ -1079,7 +1086,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         }
         [key, JsString(s) as str, ..rest] -> {
           let val =
-            get_string_elem(s, key, state.heap, state.builtins.string_proto)
+            get_string_elem(s, key, state.heap, state.builtins.string.prototype)
           Ok(State(..state, stack: [val, key, str, ..rest], pc: state.pc + 1))
         }
         _ ->
@@ -1144,7 +1151,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         }
         [JsString(s) as str, ..rest] -> {
           let val =
-            get_string_field(s, name, state.heap, state.builtins.string_proto)
+            get_string_field(
+              s,
+              name,
+              state.heap,
+              state.builtins.string.prototype,
+            )
           Ok(State(..state, stack: [val, str, ..rest], pc: state.pc + 1))
         }
         [other, ..rest] -> {
@@ -2041,6 +2053,28 @@ fn dispatch_native(
       builtins_string.string_pad_end(this, args, state.heap)
     value.NativeStringPrototypeAt ->
       builtins_string.string_at(this, args, state.heap)
+    // String/Number/Boolean constructors (type coercion)
+    value.NativeStringConstructor ->
+      builtins_string.call_as_function(args, state.heap)
+    value.NativeNumberConstructor ->
+      builtins_number.call_as_function(args, state.heap)
+    value.NativeBooleanConstructor ->
+      builtins_boolean.call_as_function(args, state.heap)
+    // Global utility functions
+    value.NativeParseInt -> builtins_number.parse_int(args, state.heap)
+    value.NativeParseFloat -> builtins_number.parse_float(args, state.heap)
+    value.NativeIsNaN -> builtins_number.js_is_nan(args, state.heap)
+    value.NativeIsFinite -> builtins_number.js_is_finite(args, state.heap)
+    // Number static methods (strict — no coercion)
+    value.NativeNumberIsNaN -> builtins_number.number_is_nan(args, state.heap)
+    value.NativeNumberIsFinite ->
+      builtins_number.number_is_finite(args, state.heap)
+    value.NativeNumberIsInteger ->
+      builtins_number.number_is_integer(args, state.heap)
+    // Number.parseInt/parseFloat are identical to global ones per spec
+    value.NativeNumberParseInt -> builtins_number.parse_int(args, state.heap)
+    value.NativeNumberParseFloat ->
+      builtins_number.parse_float(args, state.heap)
     // These are handled in call_native before reaching dispatch_native.
     // If we ever get here, it's a bug.
     value.NativeFunctionCall

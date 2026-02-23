@@ -1015,6 +1015,24 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrPutField(prop))
     }
 
+    // Compound assignment to dot member (obj.prop += val)
+    ast.AssignmentExpression(
+      op,
+      ast.MemberExpression(obj, ast.Identifier(prop), False),
+      right,
+    ) -> {
+      case compound_to_binop(op) {
+        Ok(bin_kind) -> {
+          use e <- result.try(emit_expr(e, obj))
+          let e = emit_ir(e, IrGetField2(prop))
+          use e <- result.map(emit_expr(e, right))
+          let e = emit_ir(e, IrBinOp(bin_kind))
+          emit_ir(e, IrPutField(prop))
+        }
+        Error(_) -> Error(Unsupported("assignment op"))
+      }
+    }
+
     // Assignment to computed member expression (obj[key] = val)
     ast.AssignmentExpression(
       ast.Assign,

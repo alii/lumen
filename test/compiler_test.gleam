@@ -43,6 +43,13 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
               #("RangeError", JsObject(b.range_error.constructor)),
               #("SyntaxError", JsObject(b.syntax_error.constructor)),
               #("Math", JsObject(b.math)),
+              #("String", JsObject(b.string.constructor)),
+              #("Number", JsObject(b.number.constructor)),
+              #("Boolean", JsObject(b.boolean.constructor)),
+              #("parseInt", JsObject(b.parse_int)),
+              #("parseFloat", JsObject(b.parse_float)),
+              #("isNaN", JsObject(b.is_nan)),
+              #("isFinite", JsObject(b.is_finite)),
             ])
           case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
@@ -2157,4 +2164,186 @@ pub fn string_split_empty_sep_test() {
 
 pub fn string_split_no_match_test() {
   assert_normal("'abc'.split('x').length", JsNumber(Finite(1.0)))
+}
+
+// ============================================================================
+// Compound dot-member assignment
+// ============================================================================
+
+pub fn compound_dot_member_add_test() {
+  assert_normal("var o = {x: 1}; o.x += 2; o.x", JsNumber(Finite(3.0)))
+}
+
+pub fn compound_dot_member_sub_test() {
+  assert_normal("var o = {x: 10}; o.x -= 3; o.x", JsNumber(Finite(7.0)))
+}
+
+pub fn compound_dot_member_mul_test() {
+  assert_normal("var o = {x: 5}; o.x *= 4; o.x", JsNumber(Finite(20.0)))
+}
+
+// ============================================================================
+// String/Number/Boolean constructors (type coercion)
+// ============================================================================
+
+pub fn string_constructor_coerce_number_test() {
+  assert_normal("String(42)", JsString("42"))
+}
+
+pub fn string_constructor_coerce_bool_test() {
+  assert_normal("String(true)", JsString("true"))
+}
+
+pub fn string_constructor_no_args_test() {
+  assert_normal("String()", JsString(""))
+}
+
+pub fn string_constructor_coerce_undefined_test() {
+  assert_normal("String(undefined)", JsString("undefined"))
+}
+
+pub fn number_constructor_coerce_string_test() {
+  assert_normal("Number('42')", JsNumber(Finite(42.0)))
+}
+
+pub fn number_constructor_coerce_bool_test() {
+  assert_normal("Number(true)", JsNumber(Finite(1.0)))
+}
+
+pub fn number_constructor_no_args_test() {
+  assert_normal("Number()", JsNumber(Finite(0.0)))
+}
+
+pub fn number_constructor_nan_test() {
+  assert_normal("Number('abc')", JsNumber(NaN))
+}
+
+pub fn boolean_constructor_truthy_test() {
+  assert_normal("Boolean(1)", JsBool(True))
+}
+
+pub fn boolean_constructor_falsy_test() {
+  assert_normal("Boolean(0)", JsBool(False))
+}
+
+pub fn boolean_constructor_empty_string_test() {
+  assert_normal("Boolean('')", JsBool(False))
+}
+
+pub fn boolean_constructor_no_args_test() {
+  assert_normal("Boolean()", JsBool(False))
+}
+
+pub fn boolean_constructor_object_truthy_test() {
+  assert_normal("Boolean({})", JsBool(True))
+}
+
+// ============================================================================
+// Global utility functions
+// ============================================================================
+
+pub fn parse_int_basic_test() {
+  assert_normal("parseInt('42')", JsNumber(Finite(42.0)))
+}
+
+pub fn parse_int_hex_test() {
+  assert_normal("parseInt('0xff', 16)", JsNumber(Finite(255.0)))
+}
+
+pub fn parse_int_leading_chars_test() {
+  assert_normal("parseInt('123abc')", JsNumber(Finite(123.0)))
+}
+
+pub fn parse_int_nan_test() {
+  assert_normal("parseInt('abc')", JsNumber(NaN))
+}
+
+pub fn parse_float_basic_test() {
+  assert_normal("parseFloat('3.14')", JsNumber(Finite(3.14)))
+}
+
+pub fn parse_float_nan_test() {
+  assert_normal("parseFloat('abc')", JsNumber(NaN))
+}
+
+pub fn is_nan_true_test() {
+  assert_normal("isNaN(NaN)", JsBool(True))
+}
+
+pub fn is_nan_false_test() {
+  assert_normal("isNaN(42)", JsBool(False))
+}
+
+pub fn is_nan_string_coerce_test() {
+  assert_normal("isNaN('abc')", JsBool(True))
+}
+
+pub fn is_finite_true_test() {
+  assert_normal("isFinite(42)", JsBool(True))
+}
+
+pub fn is_finite_infinity_test() {
+  assert_normal("isFinite(Infinity)", JsBool(False))
+}
+
+pub fn is_finite_nan_test() {
+  assert_normal("isFinite(NaN)", JsBool(False))
+}
+
+// ============================================================================
+// Number.isNaN / Number.isFinite / Number.isInteger (strict — no coercion)
+// ============================================================================
+
+pub fn number_is_nan_true_test() {
+  assert_normal("Number.isNaN(NaN)", JsBool(True))
+}
+
+pub fn number_is_nan_string_no_coerce_test() {
+  // Unlike global isNaN('abc'), Number.isNaN does NOT coerce
+  assert_normal("Number.isNaN('abc')", JsBool(False))
+}
+
+pub fn number_is_nan_undefined_no_coerce_test() {
+  assert_normal("Number.isNaN(undefined)", JsBool(False))
+}
+
+pub fn number_is_nan_number_false_test() {
+  assert_normal("Number.isNaN(42)", JsBool(False))
+}
+
+pub fn number_is_finite_true_test() {
+  assert_normal("Number.isFinite(42)", JsBool(True))
+}
+
+pub fn number_is_finite_infinity_test() {
+  assert_normal("Number.isFinite(Infinity)", JsBool(False))
+}
+
+pub fn number_is_finite_string_no_coerce_test() {
+  // Unlike global isFinite('42'), Number.isFinite does NOT coerce
+  assert_normal("Number.isFinite('42')", JsBool(False))
+}
+
+pub fn number_is_integer_true_test() {
+  assert_normal("Number.isInteger(42)", JsBool(True))
+}
+
+pub fn number_is_integer_float_test() {
+  assert_normal("Number.isInteger(42.5)", JsBool(False))
+}
+
+pub fn number_is_integer_zero_test() {
+  assert_normal("Number.isInteger(0)", JsBool(True))
+}
+
+pub fn number_is_integer_string_no_coerce_test() {
+  assert_normal("Number.isInteger('42')", JsBool(False))
+}
+
+pub fn number_is_integer_nan_test() {
+  assert_normal("Number.isInteger(NaN)", JsBool(False))
+}
+
+pub fn number_is_integer_infinity_test() {
+  assert_normal("Number.isInteger(Infinity)", JsBool(False))
 }

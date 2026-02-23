@@ -1,19 +1,21 @@
-import arc/vm/builtins/common.{alloc_proto}
+import arc/vm/builtins/common.{
+  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
+}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, Finite, JsNumber, JsObject, JsString,
-  JsUndefined, NaN, NativeFunction, NativeStringPrototypeAt,
-  NativeStringPrototypeCharAt, NativeStringPrototypeCharCodeAt,
-  NativeStringPrototypeConcat, NativeStringPrototypeEndsWith,
-  NativeStringPrototypeIncludes, NativeStringPrototypeIndexOf,
-  NativeStringPrototypeLastIndexOf, NativeStringPrototypePadEnd,
-  NativeStringPrototypePadStart, NativeStringPrototypeRepeat,
-  NativeStringPrototypeSlice, NativeStringPrototypeSplit,
-  NativeStringPrototypeStartsWith, NativeStringPrototypeSubstring,
-  NativeStringPrototypeToLowerCase, NativeStringPrototypeToString,
-  NativeStringPrototypeToUpperCase, NativeStringPrototypeTrim,
-  NativeStringPrototypeTrimEnd, NativeStringPrototypeTrimStart,
-  NativeStringPrototypeValueOf, ObjectSlot,
+  JsUndefined, NaN, NativeFunction, NativeStringConstructor,
+  NativeStringPrototypeAt, NativeStringPrototypeCharAt,
+  NativeStringPrototypeCharCodeAt, NativeStringPrototypeConcat,
+  NativeStringPrototypeEndsWith, NativeStringPrototypeIncludes,
+  NativeStringPrototypeIndexOf, NativeStringPrototypeLastIndexOf,
+  NativeStringPrototypePadEnd, NativeStringPrototypePadStart,
+  NativeStringPrototypeRepeat, NativeStringPrototypeSlice,
+  NativeStringPrototypeSplit, NativeStringPrototypeStartsWith,
+  NativeStringPrototypeSubstring, NativeStringPrototypeToLowerCase,
+  NativeStringPrototypeToString, NativeStringPrototypeToUpperCase,
+  NativeStringPrototypeTrim, NativeStringPrototypeTrimEnd,
+  NativeStringPrototypeTrimStart, NativeStringPrototypeValueOf, ObjectSlot,
 }
 import gleam/dict
 import gleam/float
@@ -22,9 +24,12 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 
-/// Set up String.prototype.
-/// String is NOT a constructor yet — only the prototype for primitive access.
-pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
+/// Set up String constructor + String.prototype.
+pub fn init(
+  h: Heap,
+  object_proto: Ref,
+  function_proto: Ref,
+) -> #(Heap, BuiltinType) {
   let #(h, string_proto) = alloc_proto(h, Some(object_proto), dict.new())
 
   // Add all String.prototype methods
@@ -61,7 +66,37 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
       add_method(h, string_proto, name, fn_ref)
     })
 
-  #(h, string_proto)
+  // String constructor
+  let #(h, ctor_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: NativeFunction(NativeStringConstructor),
+        properties: dict.from_list([
+          #("prototype", value.builtin_property(JsObject(string_proto))),
+          #("name", value.builtin_property(JsString("String"))),
+          #("length", value.builtin_property(JsNumber(Finite(1.0)))),
+        ]),
+        elements: dict.new(),
+        prototype: Some(function_proto),
+      ),
+    )
+  let h = heap.root(h, ctor_ref)
+  let h = set_constructor(h, string_proto, ctor_ref)
+
+  #(h, BuiltinType(prototype: string_proto, constructor: ctor_ref))
+}
+
+/// String() called as a function — type coercion to string.
+pub fn call_as_function(
+  args: List(JsValue),
+  heap: Heap,
+) -> #(Heap, Result(JsValue, JsValue)) {
+  let result = case args {
+    [] -> JsString("")
+    [val, ..] -> JsString(value.to_js_string(val))
+  }
+  #(heap, Ok(result))
 }
 
 // ============================================================================
