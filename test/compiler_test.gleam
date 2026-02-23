@@ -1,10 +1,13 @@
+import gleam/dict
 import gleam/int
 import gleam/string
 import lumen/compiler
 import lumen/parser
 import lumen/vm/builtins
 import lumen/vm/heap
-import lumen/vm/value.{Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined}
+import lumen/vm/value.{
+  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
+}
 import lumen/vm/vm
 
 // ============================================================================
@@ -26,7 +29,21 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          case vm.run(template, h, b) {
+          let globals =
+            dict.from_list([
+              #("NaN", value.JsNumber(value.NaN)),
+              #("Infinity", value.JsNumber(value.Infinity)),
+              #("undefined", JsUndefined),
+              #("Object", JsObject(b.object.constructor)),
+              #("Function", JsObject(b.function.constructor)),
+              #("Array", JsObject(b.array.constructor)),
+              #("Error", JsObject(b.error.constructor)),
+              #("TypeError", JsObject(b.type_error.constructor)),
+              #("ReferenceError", JsObject(b.reference_error.constructor)),
+              #("RangeError", JsObject(b.range_error.constructor)),
+              #("SyntaxError", JsObject(b.syntax_error.constructor)),
+            ])
+          case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
@@ -1570,5 +1587,197 @@ pub fn function_bind_multiple_args_test() {
      var bound = sum.bind(null, 1, 2);
      bound(3)",
     JsNumber(Finite(6.0)),
+  )
+}
+
+// ============================================================================
+// Object.getOwnPropertyDescriptor
+// ============================================================================
+
+pub fn object_gopd_basic_test() {
+  // Basic data property descriptor
+  assert_normal(
+    "var obj = {x: 42};
+     var desc = Object.getOwnPropertyDescriptor(obj, 'x');
+     desc.value",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn object_gopd_flags_test() {
+  // Regular data property has all flags true
+  assert_normal(
+    "var obj = {x: 1};
+     var desc = Object.getOwnPropertyDescriptor(obj, 'x');
+     '' + desc.writable + ',' + desc.enumerable + ',' + desc.configurable",
+    JsString("true,true,true"),
+  )
+}
+
+pub fn object_gopd_missing_key_test() {
+  // Non-existent property returns undefined
+  assert_normal(
+    "var obj = {x: 1};
+     Object.getOwnPropertyDescriptor(obj, 'y')",
+    JsUndefined,
+  )
+}
+
+pub fn object_gopd_after_define_test() {
+  // Property defined with defineProperty respects flags
+  assert_normal(
+    "var obj = {};
+     Object.defineProperty(obj, 'x', {value: 10, writable: false, enumerable: false, configurable: false});
+     var desc = Object.getOwnPropertyDescriptor(obj, 'x');
+     '' + desc.value + ',' + desc.writable + ',' + desc.enumerable + ',' + desc.configurable",
+    JsString("10,false,false,false"),
+  )
+}
+
+// ============================================================================
+// Object.defineProperty
+// ============================================================================
+
+pub fn object_define_property_basic_test() {
+  assert_normal(
+    "var obj = {};
+     Object.defineProperty(obj, 'x', {value: 42, writable: true, enumerable: true, configurable: true});
+     obj.x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn object_define_property_non_writable_test() {
+  // Non-writable property can't be changed in sloppy mode (silently fails)
+  assert_normal(
+    "var obj = {};
+     Object.defineProperty(obj, 'x', {value: 42, writable: false});
+     obj.x = 100;
+     obj.x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn object_define_property_non_enumerable_test() {
+  // Non-enumerable property doesn't show up in for-in
+  assert_normal(
+    "var obj = {a: 1};
+     Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
+     var keys = '';
+     for (var k in obj) { keys = keys + k; }
+     keys",
+    JsString("a"),
+  )
+}
+
+pub fn object_define_property_returns_obj_test() {
+  // defineProperty returns the target object
+  assert_normal(
+    "var obj = {};
+     var result = Object.defineProperty(obj, 'x', {value: 1});
+     result === obj",
+    JsBool(True),
+  )
+}
+
+// ============================================================================
+// Object.getOwnPropertyNames
+// ============================================================================
+
+pub fn object_gopn_basic_test() {
+  assert_normal(
+    "var obj = {a: 1, b: 2};
+     var names = Object.getOwnPropertyNames(obj);
+     names.length",
+    JsNumber(Finite(2.0)),
+  )
+}
+
+pub fn object_gopn_includes_non_enumerable_test() {
+  // getOwnPropertyNames includes non-enumerable properties
+  assert_normal(
+    "var obj = {a: 1};
+     Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
+     Object.getOwnPropertyNames(obj).length",
+    JsNumber(Finite(2.0)),
+  )
+}
+
+// ============================================================================
+// Object.keys
+// ============================================================================
+
+pub fn object_keys_basic_test() {
+  assert_normal(
+    "var obj = {a: 1, b: 2};
+     Object.keys(obj).length",
+    JsNumber(Finite(2.0)),
+  )
+}
+
+pub fn object_keys_excludes_non_enumerable_test() {
+  // keys excludes non-enumerable properties
+  assert_normal(
+    "var obj = {a: 1};
+     Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
+     Object.keys(obj).length",
+    JsNumber(Finite(1.0)),
+  )
+}
+
+// ============================================================================
+// Object.prototype.hasOwnProperty
+// ============================================================================
+
+pub fn has_own_property_basic_test() {
+  assert_normal(
+    "var obj = {x: 1};
+     obj.hasOwnProperty('x')",
+    JsBool(True),
+  )
+}
+
+pub fn has_own_property_missing_test() {
+  assert_normal(
+    "var obj = {x: 1};
+     obj.hasOwnProperty('y')",
+    JsBool(False),
+  )
+}
+
+pub fn has_own_property_inherited_test() {
+  // hasOwnProperty should return false for inherited properties
+  assert_normal(
+    "function Foo() {}
+     Foo.prototype.bar = 1;
+     var f = new Foo();
+     '' + f.hasOwnProperty('bar') + ',' + ('bar' in f)",
+    JsString("false,true"),
+  )
+}
+
+pub fn has_own_property_via_call_test() {
+  // The test262 harness pattern: Function.prototype.call.bind(Object.prototype.hasOwnProperty)
+  assert_normal(
+    "var hasOwn = Object.prototype.hasOwnProperty;
+     var obj = {x: 1};
+     hasOwn.call(obj, 'x')",
+    JsBool(True),
+  )
+}
+
+pub fn test262_property_helper_pattern_test() {
+  // Simulates the key pattern from propertyHelper.js
+  assert_normal(
+    "var __defineProperty = Object.defineProperty;
+     var __getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+     var __getOwnPropertyNames = Object.getOwnPropertyNames;
+     var __hasOwnProperty = Function.prototype.call.bind(Object.prototype.hasOwnProperty);
+     var obj = {a: 1};
+     __defineProperty(obj, 'b', {value: 2, enumerable: false, writable: true, configurable: true});
+     var desc = __getOwnPropertyDescriptor(obj, 'b');
+     var names = __getOwnPropertyNames(obj);
+     '' + desc.value + ',' + desc.enumerable + ',' + __hasOwnProperty(obj, 'a') + ',' + names.length",
+    JsString("2,false,true,2"),
   )
 }

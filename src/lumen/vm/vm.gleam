@@ -1932,6 +1932,24 @@ fn dispatch_native(
     value.NativeArrayIsArray -> builtins_array.is_array(args, state.heap)
     value.NativeErrorConstructor(proto:) ->
       builtins_error.call_native(proto, args, this, state.heap)
+    value.NativeObjectGetOwnPropertyDescriptor ->
+      builtins_object.get_own_property_descriptor(
+        args,
+        state.heap,
+        state.builtins.object.prototype,
+      )
+    value.NativeObjectDefineProperty ->
+      builtins_object.define_property(args, state.heap)
+    value.NativeObjectGetOwnPropertyNames ->
+      builtins_object.get_own_property_names(
+        args,
+        state.heap,
+        state.builtins.array.prototype,
+      )
+    value.NativeObjectKeys ->
+      builtins_object.keys(args, state.heap, state.builtins.array.prototype)
+    value.NativeObjectPrototypeHasOwnProperty ->
+      builtins_object.has_own_property(this, args, state.heap)
     // These are handled in call_native before reaching dispatch_native.
     // If we ever get here, it's a bug.
     value.NativeFunctionCall

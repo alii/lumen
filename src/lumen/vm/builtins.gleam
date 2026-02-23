@@ -39,8 +39,8 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   let #(h, object_proto) = common.alloc_proto(h, None, dict.new())
 
   // Core types
-  let #(h, object) = builtins_object.init(h, object_proto)
   let #(h, function) = builtins_function.init(h, object_proto)
+  let #(h, object) = builtins_object.init(h, object_proto, function.prototype)
   let #(h, array) = builtins_array.init(h, object_proto, function.prototype)
 
   // Error types

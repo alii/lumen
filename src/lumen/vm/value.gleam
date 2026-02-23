@@ -66,6 +66,13 @@ pub type NativeFn {
     bound_this: JsValue,
     bound_args: List(JsValue),
   )
+  // Object static methods
+  NativeObjectGetOwnPropertyDescriptor
+  NativeObjectDefineProperty
+  NativeObjectGetOwnPropertyNames
+  NativeObjectKeys
+  // Object.prototype instance method
+  NativeObjectPrototypeHasOwnProperty
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
