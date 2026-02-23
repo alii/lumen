@@ -1257,10 +1257,7 @@ pub fn for_of_string_values_test() {
 // ============================================================================
 
 pub fn delete_property_test() {
-  assert_normal(
-    "var obj = {x: 1, y: 2}; delete obj.x; obj.x",
-    JsUndefined,
-  )
+  assert_normal("var obj = {x: 1, y: 2}; delete obj.x; obj.x", JsUndefined)
 }
 
 pub fn delete_returns_true_test() {
@@ -1361,8 +1358,90 @@ pub fn function_prototype_not_enumerable_test() {
 }
 
 pub fn delete_then_in_test() {
+  assert_normal("var obj = {x: 1}; delete obj.x; 'x' in obj", JsBool(False))
+}
+
+// ============================================================================
+// Class tests
+// ============================================================================
+
+pub fn class_basic_constructor_test() {
   assert_normal(
-    "var obj = {x: 1}; delete obj.x; 'x' in obj",
-    JsBool(False),
+    "class Foo { constructor(x) { this.x = x; } } var f = new Foo(42); f.x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn class_instance_method_test() {
+  assert_normal(
+    "class Foo { greet() { return 'hi'; } } var f = new Foo(); f.greet()",
+    JsString("hi"),
+  )
+}
+
+pub fn class_method_accesses_this_test() {
+  assert_normal(
+    "class Foo { constructor(x) { this.x = x; } getX() { return this.x; } } var f = new Foo(10); f.getX()",
+    JsNumber(Finite(10.0)),
+  )
+}
+
+pub fn class_static_method_test() {
+  assert_normal(
+    "class Foo { static create() { return 99; } } Foo.create()",
+    JsNumber(Finite(99.0)),
+  )
+}
+
+pub fn class_typeof_test() {
+  assert_normal("class Foo {} typeof Foo", JsString("function"))
+}
+
+pub fn class_instanceof_test() {
+  assert_normal(
+    "class Foo {} var f = new Foo(); f instanceof Foo",
+    JsBool(True),
+  )
+}
+
+pub fn class_expression_test() {
+  assert_normal(
+    "var Foo = class { constructor(x) { this.x = x; } }; var f = new Foo(5); f.x",
+    JsNumber(Finite(5.0)),
+  )
+}
+
+pub fn class_field_initializer_test() {
+  assert_normal(
+    "class Foo { x = 42; } var f = new Foo(); f.x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn class_field_with_constructor_test() {
+  assert_normal(
+    "class Foo { x = 1; constructor(y) { this.y = y; } } var f = new Foo(2); f.x + f.y",
+    JsNumber(Finite(3.0)),
+  )
+}
+
+pub fn class_multiple_methods_test() {
+  assert_normal(
+    "class Calc { add(a, b) { return a + b; } mul(a, b) { return a * b; } } var c = new Calc(); c.add(2, 3) + c.mul(4, 5)",
+    JsNumber(Finite(25.0)),
+  )
+}
+
+pub fn class_method_not_enumerable_test() {
+  assert_normal(
+    "class Foo { bar() {} } var f = new Foo(); var keys = []; for (var k in f) { keys.push(k); } keys.length",
+    JsNumber(Finite(0.0)),
+  )
+}
+
+pub fn class_no_constructor_test() {
+  assert_normal(
+    "class Empty {} var e = new Empty(); typeof e",
+    JsString("object"),
   )
 }

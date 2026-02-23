@@ -15,13 +15,14 @@ import lumen/vm/object
 import lumen/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
   BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallConstructor,
-  CallMethod, DefineField, DeleteElem, DeleteField, Div, Dup, Eq, Exp, ForInNext,
-  ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2, GetGlobal,
-  GetIterator, GetLocal, GetThis, Gt, GtEq, IteratorClose, IteratorNext, Jump,
-  JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod,
-  Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem,
-  PutField, PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
-  StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp, Void,
+  CallMethod, DefineField, DefineMethod, DeleteElem, DeleteField, Div, Dup, Eq,
+  Exp, ForInNext, ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2,
+  GetGlobal, GetIterator, GetLocal, GetThis, Gt, GtEq, IteratorClose,
+  IteratorNext, Jump, JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt,
+  LtEq, MakeClosure, Mod, Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst,
+  PushTry, PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return, ShiftLeft,
+  ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
+  UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
   type JsNum, type JsValue, type Ref, ArrayObject, DataProperty, Finite,
@@ -968,6 +969,23 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         _ ->
           Error(#(
             VmError(StackUnderflow("DefineField")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    DefineMethod(name) -> {
+      // Like DefineField but creates a non-enumerable property (for class methods)
+      case state.stack {
+        [value, JsObject(ref) as obj, ..rest] -> {
+          let heap = object.define_method_property(state.heap, ref, name, value)
+          Ok(State(..state, heap:, stack: [obj, ..rest], pc: state.pc + 1))
+        }
+        [_, _, ..] -> Ok(State(..state, pc: state.pc + 1))
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("DefineMethod")),
             JsUndefined,
             state.heap,
           ))

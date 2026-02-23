@@ -10,15 +10,15 @@ import gleam/option.{type Option}
 import lumen/vm/opcode.{
   type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrBinOp,
   IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod, IrCloseVar,
-  IrDefineAccessor, IrDefineField, IrDefineFieldComputed, IrDeleteElem,
-  IrDeleteField, IrDup, IrEnterFinally, IrForInNext, IrForInStart, IrGetBoxed,
-  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
-  IrGetLocal, IrGetThis, IrIteratorClose, IrIteratorNext, IrJump, IrJumpIfFalse,
-  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally, IrMakeClosure,
-  IrNewObject, IrObjectSpread, IrPop, IrPopTry, IrPushConst, IrPushTry,
-  IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal, IrReturn, IrRot3,
-  IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf,
-  IrTypeofGlobal, IrUnaryOp,
+  IrDefineAccessor, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
+  IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrForInNext, IrForInStart,
+  IrGetBoxed, IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal,
+  IrGetIterator, IrGetLocal, IrGetThis, IrIteratorClose, IrIteratorNext, IrJump,
+  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
+  IrMakeClosure, IrNewObject, IrObjectSpread, IrPop, IrPopTry, IrPushConst,
+  IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal,
+  IrReturn, IrRot3, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
+  IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
 }
 import lumen/vm/value.{type JsValue}
 
@@ -150,6 +150,8 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.DefineField(name), ..acc])
     [IrDefineFieldComputed, ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineFieldComputed, ..acc])
+    [IrDefineMethod(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.DefineMethod(name), ..acc])
     [IrDefineAccessor(name, kind), ..rest] ->
       resolve_ops(rest, labels, [opcode.DefineAccessor(name, kind), ..acc])
     [IrObjectSpread, ..rest] ->

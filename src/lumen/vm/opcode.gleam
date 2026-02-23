@@ -38,6 +38,7 @@ pub type Op {
   NewObject
   DefineField(name: String)
   DefineFieldComputed
+  DefineMethod(name: String)
   DefineAccessor(name: String, kind: AccessorKind)
   ObjectSpread
   ArrayFrom(count: Int)
@@ -179,6 +180,7 @@ pub type IrOp {
   IrNewObject
   IrDefineField(name: String)
   IrDefineFieldComputed
+  IrDefineMethod(name: String)
   IrDefineAccessor(name: String, kind: AccessorKind)
   IrObjectSpread
   IrArrayFrom(count: Int)

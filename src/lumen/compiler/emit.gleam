@@ -10,12 +10,12 @@ import gleam/option.{type Option, None, Some}
 import lumen/ast
 import lumen/vm/opcode.{
   type IrOp, IrArrayFrom, IrBinOp, IrCallConstructor, IrCallMethod,
-  IrDefineField, IrDeleteElem, IrDeleteField, IrDup, IrForInNext, IrForInStart,
-  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetThis,
-  IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem,
-  IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
-  IrThrow, IrTypeOf, IrUnaryOp,
+  IrDefineField, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
+  IrForInStart, IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetIterator,
+  IrGetThis, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
+  IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrPop, IrPopTry,
+  IrPushConst, IrPushTry, IrPutElem, IrPutField, IrReturn, IrScopeGetVar,
+  IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
 }
 import lumen/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -819,6 +819,19 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       Ok(e)
     }
 
+    ast.ClassDeclaration(name, super_class, body) -> {
+      case name {
+        Some(n) -> {
+          // Class names are block-scoped (like let)
+          let e = emit_op(e, DeclareVar(n, LetBinding))
+          use e <- result.map(compile_class(e, name, super_class, body))
+          // compile_class leaves [ctor] on stack; PutVar pops it
+          emit_ir(e, IrScopePutVar(n))
+        }
+        None -> Error(Unsupported("anonymous class declaration"))
+      }
+    }
+
     ast.ForInStatement(left, right, body) -> emit_for_in(e, left, right, body)
 
     ast.ForOfStatement(left, right, body, _is_await) ->
@@ -1153,6 +1166,10 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Desugar to string concatenation: "" + "text " + expr + " more"
     ast.TemplateLiteral(quasis, expressions) ->
       emit_template_literal(e, quasis, expressions)
+
+    // Class expression
+    ast.ClassExpression(name, super_class, body) ->
+      compile_class(e, name, super_class, body)
 
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
@@ -1681,6 +1698,251 @@ fn compound_to_binop(op: ast.AssignmentOp) -> Result(opcode.BinOpKind, Nil) {
     ast.Assign -> Error(Nil)
     ast.LogicalAndAssign | ast.LogicalOrAssign | ast.NullishCoalesceAssign ->
       Error(Nil)
+  }
+}
+
+// ============================================================================
+// Class compilation
+// ============================================================================
+
+/// Compile a class body. Leaves the constructor function on the stack.
+///
+/// Strategy:
+///   1. Extract or synthesize constructor
+///   2. Inject field initializer code into constructor body
+///   3. MakeClosure for the constructor
+///   4. Define instance methods on ctor.prototype (non-enumerable)
+///   5. Define static methods on ctor (non-enumerable)
+fn compile_class(
+  e: Emitter,
+  name: Option(String),
+  super_class: Option(ast.Expression),
+  body: List(ast.ClassElement),
+) -> Result(Emitter, EmitError) {
+  // Phase 1: extends not yet supported
+  case super_class {
+    Some(_) -> Error(Unsupported("class extends"))
+    None -> compile_base_class(e, name, body)
+  }
+}
+
+fn compile_base_class(
+  e: Emitter,
+  name: Option(String),
+  body: List(ast.ClassElement),
+) -> Result(Emitter, EmitError) {
+  // Separate class elements into categories
+  let #(ctor_method, instance_methods, static_methods, instance_fields) =
+    classify_class_body(body)
+
+  // Build the constructor body statement, injecting field initializers at the top
+  let #(ctor_params, ctor_body) = case ctor_method {
+    Some(ast.ClassMethod(value: ast.FunctionExpression(_, params, body, ..), ..)) -> #(
+      params,
+      body,
+    )
+    _ -> #([], ast.BlockStatement([]))
+  }
+
+  // Compile constructor: wrap the body with field initializer preamble
+  let ctor_body_with_fields = inject_field_inits(instance_fields, ctor_body)
+  let child =
+    compile_function_body(e, name, ctor_params, ctor_body_with_fields, False)
+  let #(e, ctor_idx) = add_child_function(e, child)
+
+  // Step 1: MakeClosure for the constructor (creates .prototype + .prototype.constructor)
+  let e = emit_ir(e, IrMakeClosure(ctor_idx))
+  // Stack: [ctor]
+
+  // Step 2: Define instance methods on ctor.prototype
+  use e <- result.try(
+    list.try_fold(instance_methods, e, fn(e, method) {
+      case method {
+        ast.ClassMethod(
+          key: ast.Identifier(method_name),
+          value: ast.FunctionExpression(_, params, body, ..),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          // Stack: [ctor, ctor]
+          let e = emit_ir(e, IrGetField("prototype"))
+          // Stack: [ctor, proto]
+          let method_child =
+            compile_function_body(e, Some(method_name), params, body, False)
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          // Stack: [ctor, proto, method_fn]
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          // Stack: [ctor, proto]
+          Ok(emit_ir(e, IrPop))
+          // Stack: [ctor]
+        }
+        ast.ClassMethod(
+          key: ast.StringExpression(method_name),
+          value: ast.FunctionExpression(_, params, body, ..),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let method_child =
+            compile_function_body(e, Some(method_name), params, body, False)
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed/getter/setter class method"))
+      }
+    }),
+  )
+
+  // Step 3: Define static methods on ctor
+  use e <- result.try(
+    list.try_fold(static_methods, e, fn(e, method) {
+      case method {
+        ast.ClassMethod(
+          key: ast.Identifier(method_name),
+          value: ast.FunctionExpression(_, params, body, ..),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          // Stack: [ctor, ctor]
+          let method_child =
+            compile_function_body(e, Some(method_name), params, body, False)
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          // Stack: [ctor, ctor, method_fn]
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          // Stack: [ctor, ctor]
+          Ok(emit_ir(e, IrPop))
+          // Stack: [ctor]
+        }
+        ast.ClassMethod(
+          key: ast.StringExpression(method_name),
+          value: ast.FunctionExpression(_, params, body, ..),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          let method_child =
+            compile_function_body(e, Some(method_name), params, body, False)
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed/getter/setter static method"))
+      }
+    }),
+  )
+
+  // Stack: [ctor]
+  Ok(e)
+}
+
+/// Classify class body elements into constructor, instance methods,
+/// static methods, and instance fields.
+fn classify_class_body(
+  body: List(ast.ClassElement),
+) -> #(
+  Option(ast.ClassElement),
+  List(ast.ClassElement),
+  List(ast.ClassElement),
+  List(ast.ClassElement),
+) {
+  list.fold(body, #(None, [], [], []), fn(acc, elem) {
+    let #(ctor, instance_methods, static_methods, instance_fields) = acc
+    case elem {
+      // Constructor
+      ast.ClassMethod(kind: ast.MethodConstructor, ..) -> #(
+        Some(elem),
+        instance_methods,
+        static_methods,
+        instance_fields,
+      )
+      // Instance method (non-static, non-constructor)
+      ast.ClassMethod(is_static: False, kind: ast.MethodMethod, ..) -> #(
+        ctor,
+        list.append(instance_methods, [elem]),
+        static_methods,
+        instance_fields,
+      )
+      // Static method
+      ast.ClassMethod(is_static: True, ..) -> #(
+        ctor,
+        instance_methods,
+        list.append(static_methods, [elem]),
+        instance_fields,
+      )
+      // Instance field (non-static)
+      ast.ClassField(is_static: False, ..) -> #(
+        ctor,
+        instance_methods,
+        static_methods,
+        list.append(instance_fields, [elem]),
+      )
+      // Getter/setter on instance
+      ast.ClassMethod(is_static: False, ..) -> #(
+        ctor,
+        list.append(instance_methods, [elem]),
+        static_methods,
+        instance_fields,
+      )
+      // Skip static fields and static blocks for now
+      _ -> acc
+    }
+  })
+}
+
+/// Inject field initializer code at the start of a constructor body.
+/// Each field `x = expr` becomes: `this.x = expr;` prepended to the body.
+fn inject_field_inits(
+  fields: List(ast.ClassElement),
+  body: ast.Statement,
+) -> ast.Statement {
+  case fields {
+    [] -> body
+    _ -> {
+      let init_stmts =
+        list.filter_map(fields, fn(field) {
+          case field {
+            ast.ClassField(
+              key: ast.Identifier(name),
+              value: Some(init_expr),
+              computed: False,
+              ..,
+            ) ->
+              Ok(
+                ast.ExpressionStatement(ast.AssignmentExpression(
+                  ast.Assign,
+                  ast.MemberExpression(
+                    ast.ThisExpression,
+                    ast.Identifier(name),
+                    False,
+                  ),
+                  init_expr,
+                )),
+              )
+            ast.ClassField(
+              key: ast.Identifier(_name),
+              value: None,
+              computed: False,
+              ..,
+            ) ->
+              // Field with no initializer: this.x = undefined
+              Error(Nil)
+            _ -> Error(Nil)
+          }
+        })
+      let body_stmts = case body {
+        ast.BlockStatement(stmts) -> stmts
+        other -> [other]
+      }
+      ast.BlockStatement(list.append(init_stmts, body_stmts))
+    }
   }
 }
 

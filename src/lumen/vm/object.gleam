@@ -168,6 +168,27 @@ pub fn define_own_property(
   }
 }
 
+/// Define a method property (writable, configurable, NOT enumerable).
+/// Used for class methods and built-in methods.
+pub fn define_method_property(
+  heap: Heap,
+  ref: Ref,
+  key: String,
+  val: JsValue,
+) -> Heap {
+  case heap.read(heap, ref) {
+    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
+      let new_props = dict.insert(properties, key, value.builtin_property(val))
+      heap.write(
+        heap,
+        ref,
+        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
+      )
+    }
+    _ -> heap
+  }
+}
+
 /// Check if a property exists anywhere in the prototype chain.
 /// For `in` operator. Checks own properties, elements, then walks prototype.
 pub fn has_property(heap: Heap, ref: Ref, key: String) -> Bool {
