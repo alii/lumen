@@ -10,12 +10,12 @@ import gleam/option.{type Option, None, Some}
 import lumen/ast
 import lumen/vm/opcode.{
   type IrOp, IrArrayFrom, IrBinOp, IrCallConstructor, IrCallMethod,
-  IrDefineField, IrDup, IrForInNext, IrForInStart, IrGetElem, IrGetElem2,
-  IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrIteratorNext, IrJump,
-  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
-  IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField,
-  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow,
-  IrTypeOf, IrUnaryOp,
+  IrDefineField, IrDeleteElem, IrDeleteField, IrDup, IrForInNext, IrForInStart,
+  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetThis,
+  IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem,
+  IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
+  IrThrow, IrTypeOf, IrUnaryOp,
 }
 import lumen/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -902,6 +902,37 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.UnaryExpression(ast.TypeOf, _, arg) -> {
       use e <- result.map(emit_expr(e, arg))
       emit_ir(e, IrTypeOf)
+    }
+
+    // delete expression — special handling per argument type
+    ast.UnaryExpression(
+      ast.Delete,
+      _,
+      ast.MemberExpression(obj, ast.Identifier(prop), False),
+    ) -> {
+      // delete obj.prop → emit obj, DeleteField(prop)
+      use e <- result.map(emit_expr(e, obj))
+      emit_ir(e, IrDeleteField(prop))
+    }
+    ast.UnaryExpression(
+      ast.Delete,
+      _,
+      ast.MemberExpression(obj, key_expr, True),
+    ) -> {
+      // delete obj[key] → emit obj, emit key, DeleteElem
+      use e <- result.try(emit_expr(e, obj))
+      use e <- result.map(emit_expr(e, key_expr))
+      emit_ir(e, IrDeleteElem)
+    }
+    ast.UnaryExpression(ast.Delete, _, ast.Identifier(_)) -> {
+      // delete x → always true in sloppy mode (can't delete plain vars)
+      Ok(push_const(e, JsBool(True)))
+    }
+    ast.UnaryExpression(ast.Delete, _, arg) -> {
+      // delete <other expr> → evaluate for side effects, discard, push true
+      use e <- result.map(emit_expr(e, arg))
+      let e = emit_ir(e, IrPop)
+      push_const(e, JsBool(True))
     }
 
     ast.UnaryExpression(op, _, arg) -> {

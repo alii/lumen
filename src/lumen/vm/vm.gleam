@@ -15,18 +15,18 @@ import lumen/vm/object
 import lumen/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
   BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallConstructor,
-  CallMethod, DefineField, Div, Dup, Eq, Exp, ForInNext, ForInStart, GetBoxed,
-  GetElem, GetElem2, GetField, GetField2, GetGlobal, GetIterator, GetLocal,
-  GetThis, Gt, GtEq, IteratorClose, IteratorNext, Jump, JumpIfFalse,
-  JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg,
-  NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem, PutField,
-  PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
-  Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp, Void,
+  CallMethod, DefineField, DeleteElem, DeleteField, Div, Dup, Eq, Exp, ForInNext,
+  ForInStart, GetBoxed, GetElem, GetElem2, GetField, GetField2, GetGlobal,
+  GetIterator, GetLocal, GetThis, Gt, GtEq, IteratorClose, IteratorNext, Jump,
+  JumpIfFalse, JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod,
+  Mul, Neg, NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem,
+  PutField, PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq,
+  StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject, Finite,
-  ForInIteratorSlot, FunctionObject, Infinity, JsBigInt, JsBool, JsNull,
-  JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized, NaN,
+  type JsNum, type JsValue, type Ref, ArrayObject, DataProperty, Finite,
+  FunctionObject, Infinity, IteratorSlot, JsBigInt, JsBool, JsNull, JsNumber,
+  JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized, NaN,
   NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 
@@ -365,7 +365,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     BinOp(kind) -> {
       case state.stack {
         [right, left, ..rest] -> {
-          // instanceof needs heap access for prototype chain walking
+          // instanceof and in need heap access
           case kind {
             opcode.InstanceOf -> {
               case js_instanceof(state.heap, left, right) {
@@ -380,6 +380,34 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 Error(msg) -> {
                   let #(heap, err) =
                     object.make_type_error(state.heap, state.builtins, msg)
+                  Error(#(Thrown, err, heap))
+                }
+              }
+            }
+            opcode.In -> {
+              // left = key, right = object
+              case right {
+                JsObject(ref) -> {
+                  let key_str = to_js_string(left)
+                  let result = object.has_property(state.heap, ref, key_str)
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(result), ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                _ -> {
+                  let #(heap, err) =
+                    object.make_type_error(
+                      state.heap,
+                      state.builtins,
+                      "Cannot use 'in' operator to search for '"
+                        <> to_js_string(left)
+                        <> "' in "
+                        <> to_js_string(right),
+                    )
                   Error(#(Thrown, err, heap))
                 }
               }
@@ -500,7 +528,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           // so that `Foo.prototype.bar = ...` and `new Foo()` work.
           // .constructor on prototype is set after we have the closure ref.
           let #(heap, fn_properties, proto_ref) = case child_template.is_arrow {
-            True -> #(heap, dict.from_list([#("name", fn_name)]), None)
+            True -> #(
+              heap,
+              dict.from_list([
+                // "name" on functions: not writable, not enumerable, configurable
+                #(
+                  "name",
+                  DataProperty(
+                    value: fn_name,
+                    writable: False,
+                    enumerable: False,
+                    configurable: True,
+                  ),
+                ),
+              ]),
+              None,
+            )
             False -> {
               let #(h, proto_obj_ref) =
                 heap.alloc(
@@ -515,8 +558,26 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               #(
                 h,
                 dict.from_list([
-                  #("prototype", JsObject(proto_obj_ref)),
-                  #("name", fn_name),
+                  // "prototype" on functions: writable, not enumerable, not configurable
+                  #(
+                    "prototype",
+                    DataProperty(
+                      value: JsObject(proto_obj_ref),
+                      writable: True,
+                      enumerable: False,
+                      configurable: False,
+                    ),
+                  ),
+                  // "name" on functions: not writable, not enumerable, configurable
+                  #(
+                    "name",
+                    DataProperty(
+                      value: fn_name,
+                      writable: False,
+                      enumerable: False,
+                      configurable: True,
+                    ),
+                  ),
                 ]),
                 Some(proto_obj_ref),
               )
@@ -545,7 +606,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                       properties: dict.insert(
                         props,
                         "constructor",
-                        JsObject(closure_ref),
+                        value.builtin_property(JsObject(closure_ref)),
                       ),
                       elements:,
                       prototype:,
@@ -1136,7 +1197,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 )) -> {
                   // Read the constructor's .prototype property for the new object's __proto__
                   let proto = case dict.get(properties, "prototype") {
-                    Ok(JsObject(proto_ref)) -> Some(proto_ref)
+                    Ok(DataProperty(value: JsObject(proto_ref), ..)) ->
+                      Some(proto_ref)
                     _ -> Some(state.builtins.object.prototype)
                   }
                   // Create the new object (the `this` for the constructor)
@@ -1213,8 +1275,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             // Primitives: no enumerable properties
             _ -> []
           }
-          let #(heap, iter_ref) =
-            heap.alloc(state.heap, ForInIteratorSlot(keys:, index: 0))
+          // Wrap string keys as JsString values for unified IteratorSlot
+          let values = list.map(keys, JsString)
+          let #(heap, iter_ref) = heap.alloc(state.heap, IteratorSlot(values:))
           Ok(
             State(
               ..state,
@@ -1237,33 +1300,28 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
-            Ok(ForInIteratorSlot(keys:, index:)) ->
-              case list_get(keys, index) {
-                Ok(key) -> {
+            Ok(IteratorSlot(values:)) ->
+              case values {
+                [val, ..remaining] -> {
                   // Advance the iterator
                   let heap =
                     heap.write(
                       state.heap,
                       iter_ref,
-                      ForInIteratorSlot(keys:, index: index + 1),
+                      IteratorSlot(values: remaining),
                     )
-                  // Push: iterator stays, key, done=false
+                  // Push: iterator stays, value, done=false
                   Ok(
                     State(
                       ..state,
-                      stack: [
-                        JsBool(False),
-                        JsString(key),
-                        JsObject(iter_ref),
-                        ..rest
-                      ],
+                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
                       heap:,
                       pc: state.pc + 1,
                     ),
                   )
                 }
-                Error(_) -> {
-                  // No more keys — push undefined + done=true
+                [] -> {
+                  // No more values — push undefined + done=true
                   Ok(
                     State(
                       ..state,
@@ -1280,7 +1338,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               }
             _ ->
               Error(#(
-                VmError(Unimplemented("ForInNext: not a ForInIteratorSlot")),
+                VmError(Unimplemented("ForInNext: not an IteratorSlot")),
                 JsUndefined,
                 state.heap,
               ))
@@ -1296,13 +1354,11 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           case iterable {
             JsObject(ref) ->
               case heap.read(state.heap, ref) {
-                Ok(ObjectSlot(kind: ArrayObject(length:), ..)) -> {
-                  // Create array iterator
+                Ok(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
+                  // Pre-collect array elements into a list for unified IteratorSlot
+                  let values = collect_array_values(elements, 0, length, [])
                   let #(heap, iter_ref) =
-                    heap.alloc(
-                      state.heap,
-                      ArrayIteratorSlot(source: ref, index: 0, length:),
-                    )
+                    heap.alloc(state.heap, IteratorSlot(values:))
                   Ok(
                     State(
                       ..state,
@@ -1346,9 +1402,26 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [JsObject(iter_ref), ..rest] ->
           case heap.read(state.heap, iter_ref) {
-            Ok(ArrayIteratorSlot(source:, index:, length:)) ->
-              case index >= length {
-                True -> {
+            Ok(IteratorSlot(values:)) ->
+              case values {
+                [val, ..remaining] -> {
+                  // Advance the iterator
+                  let heap =
+                    heap.write(
+                      state.heap,
+                      iter_ref,
+                      IteratorSlot(values: remaining),
+                    )
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                [] -> {
                   // Done — push undefined + done=true
                   Ok(
                     State(
@@ -1363,36 +1436,10 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     ),
                   )
                 }
-                False -> {
-                  // Get element at current index
-                  let val = case heap.read(state.heap, source) {
-                    Ok(ObjectSlot(elements:, ..)) ->
-                      case dict.get(elements, index) {
-                        Ok(v) -> v
-                        Error(_) -> JsUndefined
-                      }
-                    _ -> JsUndefined
-                  }
-                  // Advance iterator
-                  let heap =
-                    heap.write(
-                      state.heap,
-                      iter_ref,
-                      ArrayIteratorSlot(source:, index: index + 1, length:),
-                    )
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
-                      heap:,
-                      pc: state.pc + 1,
-                    ),
-                  )
-                }
               }
             _ ->
               Error(#(
-                VmError(Unimplemented("IteratorNext: not an ArrayIteratorSlot")),
+                VmError(Unimplemented("IteratorNext: not an IteratorSlot")),
                 JsUndefined,
                 state.heap,
               ))
@@ -1413,6 +1460,69 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         _ ->
           Error(#(
             VmError(StackUnderflow("IteratorClose")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    // -- Delete operator --
+    DeleteField(name) -> {
+      case state.stack {
+        [obj, ..rest] ->
+          case obj {
+            JsObject(ref) -> {
+              let #(heap, success) =
+                object.delete_property(state.heap, ref, name)
+              Ok(
+                State(
+                  ..state,
+                  stack: [JsBool(success), ..rest],
+                  heap:,
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+            // delete on non-object returns true
+            _ ->
+              Ok(
+                State(..state, stack: [JsBool(True), ..rest], pc: state.pc + 1),
+              )
+          }
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("DeleteField")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    DeleteElem -> {
+      case state.stack {
+        [key, obj, ..rest] ->
+          case obj {
+            JsObject(ref) -> {
+              let key_str = to_js_string(key)
+              let #(heap, success) =
+                object.delete_property(state.heap, ref, key_str)
+              Ok(
+                State(
+                  ..state,
+                  stack: [JsBool(success), ..rest],
+                  heap:,
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+            _ ->
+              Ok(
+                State(..state, stack: [JsBool(True), ..rest], pc: state.pc + 1),
+              )
+          }
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("DeleteElem")),
             JsUndefined,
             state.heap,
           ))
@@ -1616,7 +1726,7 @@ fn get_elem_value(heap: Heap, ref: value.Ref, key: JsValue) -> JsValue {
                 _ -> {
                   let key_str = to_js_string(key)
                   case dict.get(properties, key_str) {
-                    Ok(val) -> val
+                    Ok(DataProperty(value: val, ..)) -> val
                     Error(_) ->
                       case prototype {
                         Some(proto_ref) -> get_elem_value(heap, proto_ref, key)
@@ -1669,16 +1779,7 @@ fn put_elem_value(
             }
             Error(_) -> {
               let key_str = to_js_string(key)
-              heap.write(
-                heap,
-                ref,
-                ObjectSlot(
-                  kind:,
-                  properties: dict.insert(properties, key_str, val),
-                  elements:,
-                  prototype:,
-                ),
-              )
+              object.set_property(heap, ref, key_str, val)
             }
           }
         OrdinaryObject | FunctionObject(..) | NativeFunction(_) -> {
@@ -1795,10 +1896,10 @@ fn exec_binop(
     GtEq ->
       compare_values(left, right, fn(ord) { ord == GtOrd || ord == EqOrd })
 
-    // In operator — needs runtime object support
-    opcode.In -> Error("in operator not yet implemented")
-    // InstanceOf handled in BinOp dispatcher (needs heap access)
-    opcode.InstanceOf -> Error("instanceof: unreachable")
+    // In and InstanceOf handled in BinOp dispatcher (needs heap access)
+    opcode.In -> Error("in: unreachable — handled in dispatcher")
+    opcode.InstanceOf ->
+      Error("instanceof: unreachable — handled in dispatcher")
   }
 }
 
@@ -2159,6 +2260,25 @@ fn compare_nums(a: JsNum, b: JsNum) -> CompareOrd {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Pre-collect array elements into a list for IteratorSlot.
+fn collect_array_values(
+  elements: dict.Dict(Int, JsValue),
+  idx: Int,
+  length: Int,
+  acc: List(JsValue),
+) -> List(JsValue) {
+  case idx >= length {
+    True -> list.reverse(acc)
+    False -> {
+      let val = case dict.get(elements, idx) {
+        Ok(v) -> v
+        Error(_) -> JsUndefined
+      }
+      collect_array_values(elements, idx + 1, length, [val, ..acc])
+    }
+  }
+}
 
 /// Get element at index from a list. O(n) — will replace with Array later.
 fn list_get(items: List(a), index: Int) -> Result(a, Nil) {

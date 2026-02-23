@@ -2,7 +2,7 @@ import gleam/dict.{type Dict}
 import gleam/option.{type Option}
 import lumen/vm/heap.{type Heap}
 import lumen/vm/value.{
-  type JsValue, type Ref, JsObject, ObjectSlot, OrdinaryObject,
+  type Property, type Ref, JsObject, ObjectSlot, OrdinaryObject,
 }
 
 /// A prototype + constructor pair. Every JS builtin type has both.
@@ -15,7 +15,7 @@ pub type BuiltinType {
 pub fn alloc_proto(
   h: Heap,
   prototype: Option(Ref),
-  properties: Dict(String, JsValue),
+  properties: Dict(String, Property),
 ) -> #(Heap, Ref) {
   let #(h, ref) =
     heap.alloc(
@@ -32,10 +32,16 @@ pub fn alloc_proto(
 }
 
 /// Set .constructor on a prototype pointing back to its constructor.
+/// "constructor" is NOT enumerable per spec (writable+configurable).
 pub fn set_constructor(h: Heap, proto_ref: Ref, ctor_ref: Ref) -> Heap {
   case heap.read(h, proto_ref) {
     Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props = dict.insert(properties, "constructor", JsObject(ctor_ref))
+      let new_props =
+        dict.insert(
+          properties,
+          "constructor",
+          value.builtin_property(JsObject(ctor_ref)),
+        )
       heap.write(
         h,
         proto_ref,

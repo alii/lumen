@@ -72,15 +72,49 @@ pub type ExoticKind {
   NativeFunction(native: NativeFn)
 }
 
+/// Property descriptor — writable/enumerable/configurable flags per property.
+/// Following QuickJS: bit-flags on every property. No accessor properties yet.
+pub type Property {
+  DataProperty(
+    value: JsValue,
+    writable: Bool,
+    enumerable: Bool,
+    configurable: Bool,
+  )
+}
+
+/// Normal assignment: all flags true (obj.x = val, object literals, etc.)
+pub fn data_property(val: JsValue) -> Property {
+  DataProperty(value: val, writable: True, enumerable: True, configurable: True)
+}
+
+/// Built-in methods/prototype props: writable+configurable, NOT enumerable.
+/// This matches QuickJS and the spec for built-in function properties.
+pub fn builtin_property(val: JsValue) -> Property {
+  DataProperty(
+    value: val,
+    writable: True,
+    enumerable: False,
+    configurable: True,
+  )
+}
+
+/// Extract refs reachable from a Property.
+pub fn refs_in_property(prop: Property) -> List(Ref) {
+  case prop {
+    DataProperty(value:, ..) -> refs_in_value(value)
+  }
+}
+
 /// What lives in a heap slot.
 pub type HeapSlot {
   /// Unified object slot — covers ordinary objects, arrays, and functions.
-  /// - `properties`: string-keyed own properties (all object kinds)
-  /// - `elements`: integer-keyed elements (primarily for ArrayObject)
+  /// - `properties`: string-keyed own properties with descriptor flags
+  /// - `elements`: integer-keyed elements (primarily for ArrayObject, bare values)
   /// - `prototype`: link for prototype chain traversal
   ObjectSlot(
     kind: ExoticKind,
-    properties: Dict(String, JsValue),
+    properties: Dict(String, Property),
     elements: Dict(Int, JsValue),
     prototype: Option(Ref),
   )
@@ -93,12 +127,10 @@ pub type HeapSlot {
   /// by a closure AND mutated, both the local frame and EnvSlot hold a Ref to
   /// the same BoxSlot. Reads/writes go through this indirection.
   BoxSlot(value: JsValue)
-  /// Iterator state for for-in loops. Holds the collected enumerable keys
-  /// and the current index into that list.
-  ForInIteratorSlot(keys: List(String), index: Int)
-  /// Iterator state for for-of loops over arrays. Holds a ref to the source
-  /// array, the current index, and the array length at iteration start.
-  ArrayIteratorSlot(source: Ref, index: Int, length: Int)
+  /// Unified iterator state for for-in and for-of loops.
+  /// Both eagerly pre-collect values into a list. For for-in: string keys
+  /// wrapped as JsString. For for-of: array element values directly.
+  IteratorSlot(values: List(JsValue))
 }
 
 /// Extract refs from a single JsValue. Only JsObject carries heap refs now.
@@ -122,7 +154,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
     ObjectSlot(kind:, properties:, elements:, prototype:) -> {
       let prop_refs =
         dict.values(properties)
-        |> list.flat_map(refs_in_value)
+        |> list.flat_map(refs_in_property)
       let elem_refs =
         dict.values(elements)
         |> list.flat_map(refs_in_value)
@@ -139,8 +171,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
     }
     EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
     BoxSlot(value:) -> refs_in_value(value)
-    ForInIteratorSlot(..) -> []
-    ArrayIteratorSlot(source:, ..) -> [source]
+    IteratorSlot(values:) -> list.flat_map(values, refs_in_value)
   }
 }
 

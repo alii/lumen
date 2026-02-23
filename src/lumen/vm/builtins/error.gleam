@@ -26,14 +26,14 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, ErrorBuiltins) {
-  // Error.prototype — has both "name" and "message"
+  // Error.prototype — has both "name" and "message" (NOT enumerable)
   let #(h, error_proto) =
     alloc_proto(
       h,
       Some(object_proto),
       dict.from_list([
-        #("name", JsString("Error")),
-        #("message", JsString("")),
+        #("name", value.builtin_property(JsString("Error"))),
+        #("message", value.builtin_property(JsString(""))),
       ]),
     )
 
@@ -83,6 +83,7 @@ pub fn init(
 
 /// Native error constructor: if (message !== undefined) this.message = message
 /// Creates a new error object with the proto embedded in the NativeFn.
+/// Error instance "message" IS enumerable (data_property).
 pub fn call_native(
   proto: Ref,
   args: List(JsValue),
@@ -91,8 +92,12 @@ pub fn call_native(
 ) -> #(Heap, Result(JsValue, JsValue)) {
   let props = case args {
     [JsUndefined, ..] | [] -> dict.new()
-    [JsString(msg), ..] -> dict.from_list([#("message", JsString(msg))])
-    [other, ..] -> dict.from_list([#("message", JsString(to_string(other)))])
+    [JsString(msg), ..] ->
+      dict.from_list([#("message", value.data_property(JsString(msg)))])
+    [other, ..] ->
+      dict.from_list([
+        #("message", value.data_property(JsString(to_string(other)))),
+      ])
   }
   let #(heap, ref) =
     heap.alloc(
@@ -108,7 +113,11 @@ pub fn call_native(
 }
 
 fn alloc_named_proto(h: Heap, parent: Ref, name: String) -> #(Heap, Ref) {
-  alloc_proto(h, Some(parent), dict.from_list([#("name", JsString(name))]))
+  alloc_proto(
+    h,
+    Some(parent),
+    dict.from_list([#("name", value.builtin_property(JsString(name)))]),
+  )
 }
 
 /// Allocate a NativeFunction error constructor on the heap.
@@ -124,8 +133,8 @@ fn alloc_error_ctor(
       ObjectSlot(
         kind: NativeFunction(NativeErrorConstructor(proto: error_proto)),
         properties: dict.from_list([
-          #("prototype", JsObject(error_proto)),
-          #("name", JsString(name)),
+          #("prototype", value.builtin_property(JsObject(error_proto))),
+          #("name", value.builtin_property(JsString(name))),
         ]),
         elements: dict.new(),
         prototype: Some(function_proto),

@@ -16,8 +16,8 @@ pub fn init(h: Heap, object_proto: Ref) -> #(Heap, BuiltinType) {
       ObjectSlot(
         kind: NativeFunction(NativeObjectConstructor),
         properties: dict.from_list([
-          #("prototype", JsObject(object_proto)),
-          #("name", JsString("Object")),
+          #("prototype", value.builtin_property(JsObject(object_proto))),
+          #("name", value.builtin_property(JsString("Object"))),
         ]),
         elements: dict.new(),
         prototype: Some(object_proto),

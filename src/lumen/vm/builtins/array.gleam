@@ -28,8 +28,8 @@ pub fn init(
       ObjectSlot(
         kind: NativeFunction(NativeArrayConstructor),
         properties: dict.from_list([
-          #("prototype", JsObject(array_proto)),
-          #("name", JsString("Array")),
+          #("prototype", value.builtin_property(JsObject(array_proto))),
+          #("name", value.builtin_property(JsString("Array"))),
         ]),
         elements: dict.new(),
         prototype: Some(function_proto),
@@ -43,17 +43,24 @@ pub fn init(
       h,
       ObjectSlot(
         kind: NativeFunction(NativeArrayIsArray),
-        properties: dict.from_list([#("name", JsString("isArray"))]),
+        properties: dict.from_list([
+          #("name", value.builtin_property(JsString("isArray"))),
+        ]),
         elements: dict.new(),
         prototype: Some(function_proto),
       ),
     )
   let h = heap.root(h, is_array_ref)
 
-  // Set Array.isArray on constructor
+  // Set Array.isArray on constructor (NOT enumerable)
   let h = case heap.read(h, ctor_ref) {
     Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props = dict.insert(properties, "isArray", JsObject(is_array_ref))
+      let new_props =
+        dict.insert(
+          properties,
+          "isArray",
+          value.builtin_property(JsObject(is_array_ref)),
+        )
       heap.write(
         h,
         ctor_ref,

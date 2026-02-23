@@ -62,6 +62,20 @@ fn assert_normal_number(source: String, expected: Float) {
   assert_normal(source, JsNumber(Finite(expected)))
 }
 
+fn assert_thrown(source: String) {
+  case run_js(source) {
+    Ok(vm.ThrowCompletion(_, _)) -> Nil
+    Ok(vm.NormalCompletion(val, _)) ->
+      panic as {
+        "expected ThrowCompletion, got NormalCompletion("
+        <> string.inspect(val)
+        <> ") for: "
+        <> source
+      }
+    Error(err) -> panic as { "error for: " <> source <> " — " <> err }
+  }
+}
+
 // ============================================================================
 // Literal tests
 // ============================================================================
@@ -1235,5 +1249,120 @@ pub fn for_of_string_values_test() {
   assert_normal(
     "var result = ''; for (var x of ['a', 'b', 'c']) { result += x; } result",
     JsString("abc"),
+  )
+}
+
+// ============================================================================
+// delete operator
+// ============================================================================
+
+pub fn delete_property_test() {
+  assert_normal(
+    "var obj = {x: 1, y: 2}; delete obj.x; obj.x",
+    JsUndefined,
+  )
+}
+
+pub fn delete_returns_true_test() {
+  assert_normal("var obj = {x: 1}; delete obj.x", JsBool(True))
+}
+
+pub fn delete_nonexistent_test() {
+  assert_normal("var obj = {}; delete obj.x", JsBool(True))
+}
+
+pub fn delete_computed_test() {
+  assert_normal(
+    "var obj = {a: 10}; var k = 'a'; delete obj[k]; obj.a",
+    JsUndefined,
+  )
+}
+
+pub fn delete_variable_test() {
+  // delete of a plain variable returns true in sloppy mode
+  assert_normal("var x = 1; delete x", JsBool(True))
+}
+
+pub fn delete_non_object_test() {
+  assert_normal("delete 42", JsBool(True))
+}
+
+// ============================================================================
+// in operator
+// ============================================================================
+
+pub fn in_own_property_test() {
+  assert_normal("'x' in {x: 1}", JsBool(True))
+}
+
+pub fn in_missing_property_test() {
+  assert_normal("'y' in {x: 1}", JsBool(False))
+}
+
+pub fn in_prototype_chain_test() {
+  // "constructor" exists on the prototype (inherited)
+  assert_normal("'constructor' in {}", JsBool(True))
+}
+
+pub fn in_array_index_test() {
+  assert_normal("0 in [10, 20]", JsBool(True))
+}
+
+pub fn in_array_length_test() {
+  assert_normal("'length' in []", JsBool(True))
+}
+
+pub fn in_throws_for_non_object_test() {
+  assert_thrown("'x' in 42")
+}
+
+// ============================================================================
+// Property descriptor behavior
+// ============================================================================
+
+pub fn for_in_skips_non_enumerable_test() {
+  // for-in on new Foo() should NOT include "constructor" (non-enumerable)
+  assert_normal(
+    "function Foo() {} var result = ''; for (var k in new Foo()) { result += k; } result",
+    JsString(""),
+  )
+}
+
+pub fn for_in_includes_own_enumerable_test() {
+  // Own properties set via assignment ARE enumerable
+  assert_normal(
+    "function Foo() { this.x = 1; this.y = 2; } var result = ''; for (var k in new Foo()) { result += k; } result",
+    JsString("xy"),
+  )
+}
+
+pub fn for_in_prototype_enumerable_test() {
+  // User-set prototype properties are enumerable and show in for-in
+  assert_normal(
+    "function Foo() {} Foo.prototype.bar = 42; var result = ''; for (var k in new Foo()) { result += k; } result",
+    JsString("bar"),
+  )
+}
+
+pub fn function_name_not_enumerable_test() {
+  // function.name is not enumerable
+  assert_normal(
+    "function foo() {} var result = ''; for (var k in foo) { result += k; } result",
+    JsString(""),
+  )
+}
+
+pub fn function_prototype_not_enumerable_test() {
+  // function.prototype is not enumerable
+  assert_normal(
+    "function foo() {} var keys = []; for (var k in foo) { keys.push(k); } keys.length",
+    JsNumber(Finite(0.0)),
+  )
+}
+
+pub fn delete_then_in_test() {
+  assert_normal(
+    "var obj = {x: 1}; delete obj.x; 'x' in obj",
+    JsBool(False),
   )
 }

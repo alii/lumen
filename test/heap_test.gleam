@@ -8,10 +8,10 @@ import lumen/vm/value.{
   Ref, SymbolId,
 }
 
-fn ordinary(props) {
+fn ordinary(props: dict.Dict(String, value.JsValue)) {
   ObjectSlot(
     kind: OrdinaryObject,
-    properties: props,
+    properties: dict.map_values(props, fn(_, v) { value.data_property(v) }),
     elements: dict.new(),
     prototype: None,
   )
