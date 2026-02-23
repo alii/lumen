@@ -15,10 +15,10 @@ Before writing any code, study how existing JS engines implement this function. 
 
 1. **Read the ECMAScript spec** — WebSearch for the spec section (e.g. "Array.from ecma262 spec").
 2. **Study QuickJS** — Best first reference. Search GitHub for the function name in `quickjs.c`:
-   - WebFetch `https://raw.githubusercontent.com/nicedoc/quickjs/master/quickjs.c` or search GitHub
+   - WebFetch `https://raw.githubusercontent.com/bellard/quickjs/master/quickjs.c` or search GitHub
    - Look for the C implementation, note edge cases, type coercions, error conditions
 3. **Cross-reference engine262** — JS engine in JS, maps directly to spec. Search in `engine262/src/`:
-   - WebFetch from `https://github.com/nicedoc/engine262`
+   - WebFetch from `https://github.com/engine262/engine262`
 4. **Check test262** — Look at existing test cases to understand expected behavior:
    - Search `vendor/test262/test/built-ins/` for the relevant directory
 
