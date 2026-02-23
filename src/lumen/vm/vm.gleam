@@ -15,18 +15,19 @@ import lumen/vm/object
 import lumen/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
   BinOp, BitAnd, BitNot, BitOr, BitXor, BoxLocal, Call, CallConstructor,
-  CallMethod, DefineField, Div, Dup, Eq, Exp, GetBoxed, GetElem, GetElem2,
-  GetField, GetField2, GetGlobal, GetLocal, GetThis, Gt, GtEq, Jump, JumpIfFalse,
+  CallMethod, DefineField, Div, Dup, Eq, Exp, ForInNext, ForInStart, GetBoxed,
+  GetElem, GetElem2, GetField, GetField2, GetGlobal, GetIterator, GetLocal,
+  GetThis, Gt, GtEq, IteratorClose, IteratorNext, Jump, JumpIfFalse,
   JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg,
   NewObject, NotEq, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem, PutField,
   PutGlobal, PutLocal, Return, ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub,
   Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp, Void,
 }
 import lumen/vm/value.{
-  type JsNum, type JsValue, type Ref, ArrayObject, Finite, FunctionObject,
-  Infinity, JsBigInt, JsBool, JsNull, JsNumber, JsObject, JsString, JsSymbol,
-  JsUndefined, JsUninitialized, NaN, NativeFunction, NegInfinity, ObjectSlot,
-  OrdinaryObject,
+  type JsNum, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject, Finite,
+  ForInIteratorSlot, FunctionObject, Infinity, JsBigInt, JsBool, JsNull,
+  JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized, NaN,
+  NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 
 // ============================================================================
@@ -1194,6 +1195,224 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         Error(_) ->
           Error(#(
             VmError(StackUnderflow("CallConstructor: not enough args")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    // -- Iteration --
+    ForInStart -> {
+      case state.stack {
+        [obj, ..rest] -> {
+          // Collect enumerable keys from the object (or empty for non-objects)
+          let keys = case obj {
+            JsObject(ref) -> object.enumerate_keys(state.heap, ref)
+            // for-in on null/undefined produces no iterations
+            JsNull | JsUndefined -> []
+            // Primitives: no enumerable properties
+            _ -> []
+          }
+          let #(heap, iter_ref) =
+            heap.alloc(state.heap, ForInIteratorSlot(keys:, index: 0))
+          Ok(
+            State(
+              ..state,
+              stack: [JsObject(iter_ref), ..rest],
+              heap:,
+              pc: state.pc + 1,
+            ),
+          )
+        }
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("ForInStart")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    ForInNext -> {
+      case state.stack {
+        [JsObject(iter_ref), ..rest] ->
+          case heap.read(state.heap, iter_ref) {
+            Ok(ForInIteratorSlot(keys:, index:)) ->
+              case list_get(keys, index) {
+                Ok(key) -> {
+                  // Advance the iterator
+                  let heap =
+                    heap.write(
+                      state.heap,
+                      iter_ref,
+                      ForInIteratorSlot(keys:, index: index + 1),
+                    )
+                  // Push: iterator stays, key, done=false
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [
+                        JsBool(False),
+                        JsString(key),
+                        JsObject(iter_ref),
+                        ..rest
+                      ],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                Error(_) -> {
+                  // No more keys — push undefined + done=true
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [
+                        JsBool(True),
+                        JsUndefined,
+                        JsObject(iter_ref),
+                        ..rest
+                      ],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+              }
+            _ ->
+              Error(#(
+                VmError(Unimplemented("ForInNext: not a ForInIteratorSlot")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        _ ->
+          Error(#(VmError(StackUnderflow("ForInNext")), JsUndefined, state.heap))
+      }
+    }
+
+    GetIterator -> {
+      case state.stack {
+        [iterable, ..rest] ->
+          case iterable {
+            JsObject(ref) ->
+              case heap.read(state.heap, ref) {
+                Ok(ObjectSlot(kind: ArrayObject(length:), ..)) -> {
+                  // Create array iterator
+                  let #(heap, iter_ref) =
+                    heap.alloc(
+                      state.heap,
+                      ArrayIteratorSlot(source: ref, index: 0, length:),
+                    )
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsObject(iter_ref), ..rest],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                _ -> {
+                  // Non-array object — throw TypeError
+                  let #(heap, err) =
+                    object.make_type_error(
+                      state.heap,
+                      state.builtins,
+                      "object is not iterable",
+                    )
+                  Error(#(Thrown, err, heap))
+                }
+              }
+            _ -> {
+              let #(heap, err) =
+                object.make_type_error(
+                  state.heap,
+                  state.builtins,
+                  typeof_value(iterable, state.heap) <> " is not iterable",
+                )
+              Error(#(Thrown, err, heap))
+            }
+          }
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("GetIterator")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    IteratorNext -> {
+      case state.stack {
+        [JsObject(iter_ref), ..rest] ->
+          case heap.read(state.heap, iter_ref) {
+            Ok(ArrayIteratorSlot(source:, index:, length:)) ->
+              case index >= length {
+                True -> {
+                  // Done — push undefined + done=true
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [
+                        JsBool(True),
+                        JsUndefined,
+                        JsObject(iter_ref),
+                        ..rest
+                      ],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                False -> {
+                  // Get element at current index
+                  let val = case heap.read(state.heap, source) {
+                    Ok(ObjectSlot(elements:, ..)) ->
+                      case dict.get(elements, index) {
+                        Ok(v) -> v
+                        Error(_) -> JsUndefined
+                      }
+                    _ -> JsUndefined
+                  }
+                  // Advance iterator
+                  let heap =
+                    heap.write(
+                      state.heap,
+                      iter_ref,
+                      ArrayIteratorSlot(source:, index: index + 1, length:),
+                    )
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(False), val, JsObject(iter_ref), ..rest],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+              }
+            _ ->
+              Error(#(
+                VmError(Unimplemented("IteratorNext: not an ArrayIteratorSlot")),
+                JsUndefined,
+                state.heap,
+              ))
+          }
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("IteratorNext")),
+            JsUndefined,
+            state.heap,
+          ))
+      }
+    }
+
+    IteratorClose -> {
+      // MVP: just pop the iterator from the stack
+      case state.stack {
+        [_, ..rest] -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+        _ ->
+          Error(#(
+            VmError(StackUnderflow("IteratorClose")),
             JsUndefined,
             state.heap,
           ))

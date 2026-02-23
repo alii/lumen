@@ -1120,3 +1120,120 @@ pub fn nested_default_test() {
 pub fn arrow_param_destructuring_test() {
   assert_normal_number("var f = ({a, b}) => a * b; f({a: 3, b: 4})", 12.0)
 }
+
+// ============================================================================
+// For-in loop tests
+// ============================================================================
+
+pub fn for_in_object_basic_test() {
+  // Collect keys from a plain object
+  assert_normal_number(
+    "var sum = 0; var obj = {a: 1, b: 2, c: 3}; for (var k in obj) { sum += obj[k]; } sum",
+    6.0,
+  )
+}
+
+pub fn for_in_let_binding_test() {
+  assert_normal(
+    "var result = ''; var obj = {x: 1, y: 2}; for (let k in obj) { result += k; } result",
+    JsString("xy"),
+  )
+}
+
+pub fn for_in_null_test() {
+  // for-in on null should not iterate
+  assert_normal_number("var x = 0; for (var k in null) { x = 1; } x", 0.0)
+}
+
+pub fn for_in_undefined_test() {
+  // for-in on undefined should not iterate
+  assert_normal_number("var x = 0; for (var k in undefined) { x = 1; } x", 0.0)
+}
+
+pub fn for_in_array_test() {
+  // for-in on array iterates indices as strings
+  assert_normal(
+    "var result = ''; for (var k in [10, 20, 30]) { result += k; } result",
+    JsString("012"),
+  )
+}
+
+pub fn for_in_break_test() {
+  assert_normal_number(
+    "var count = 0; for (var k in {a: 1, b: 2, c: 3}) { count++; if (count === 2) break; } count",
+    2.0,
+  )
+}
+
+pub fn for_in_continue_test() {
+  assert_normal_number(
+    "var sum = 0; var obj = {a: 1, b: 2, c: 3}; for (var k in obj) { if (k === 'b') continue; sum += obj[k]; } sum",
+    4.0,
+  )
+}
+
+pub fn for_in_existing_var_test() {
+  // for-in with existing variable (no declaration)
+  assert_normal(
+    "var k; for (k in {hello: 1, world: 2}) {} k",
+    JsString("world"),
+  )
+}
+
+// ============================================================================
+// For-of loop tests
+// ============================================================================
+
+pub fn for_of_array_basic_test() {
+  assert_normal_number(
+    "var sum = 0; for (var x of [1, 2, 3]) { sum += x; } sum",
+    6.0,
+  )
+}
+
+pub fn for_of_let_binding_test() {
+  assert_normal_number(
+    "var sum = 0; for (let x of [10, 20, 30]) { sum += x; } sum",
+    60.0,
+  )
+}
+
+pub fn for_of_const_binding_test() {
+  assert_normal_number(
+    "var sum = 0; for (const x of [5, 10, 15]) { sum += x; } sum",
+    30.0,
+  )
+}
+
+pub fn for_of_break_test() {
+  assert_normal_number(
+    "var sum = 0; for (var x of [1, 2, 3, 4, 5]) { if (x > 3) break; sum += x; } sum",
+    6.0,
+  )
+}
+
+pub fn for_of_continue_test() {
+  assert_normal_number(
+    "var sum = 0; for (var x of [1, 2, 3, 4]) { if (x === 2) continue; sum += x; } sum",
+    8.0,
+  )
+}
+
+pub fn for_of_empty_array_test() {
+  assert_normal_number("var sum = 0; for (var x of []) { sum += x; } sum", 0.0)
+}
+
+pub fn for_of_destructuring_test() {
+  // for-of with array destructuring
+  assert_normal_number(
+    "var sum = 0; var arr = [[1, 2], [3, 4]]; for (var [a, b] of arr) { sum += a + b; } sum",
+    10.0,
+  )
+}
+
+pub fn for_of_string_values_test() {
+  assert_normal(
+    "var result = ''; for (var x of ['a', 'b', 'c']) { result += x; } result",
+    JsString("abc"),
+  )
+}

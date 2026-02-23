@@ -10,10 +10,11 @@ import gleam/option.{type Option, None, Some}
 import lumen/ast
 import lumen/vm/opcode.{
   type IrOp, IrArrayFrom, IrBinOp, IrCallConstructor, IrCallMethod,
-  IrDefineField, IrDup, IrGetElem, IrGetElem2, IrGetField, IrGetField2,
-  IrGetThis, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
-  IrMakeClosure, IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem,
-  IrPutField, IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrThrow,
+  IrDefineField, IrDup, IrForInNext, IrForInStart, IrGetElem, IrGetElem2,
+  IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrIteratorNext, IrJump,
+  IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrMakeClosure,
+  IrNewObject, IrPop, IrPopTry, IrPushConst, IrPushTry, IrPutElem, IrPutField,
+  IrReturn, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow,
   IrTypeOf, IrUnaryOp,
 }
 import lumen/vm/value.{
@@ -421,6 +422,19 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
       }
       list.flatten([block_vars, handler_vars, finally_vars])
     }
+    ast.ForInStatement(left, _, body) | ast.ForOfStatement(left, _, body, ..) -> {
+      let left_vars = case left {
+        ast.ForInitDeclaration(ast.VariableDeclaration(ast.Var, decls)) ->
+          list.flat_map(decls, fn(d) {
+            case d {
+              ast.VariableDeclarator(pattern, _) ->
+                collect_pattern_names(pattern)
+            }
+          })
+        _ -> []
+      }
+      list.append(left_vars, collect_vars_stmt(body))
+    }
     ast.LabeledStatement(_, body) -> collect_vars_stmt(body)
     ast.SwitchStatement(_, cases) ->
       list.flat_map(cases, fn(c) {
@@ -804,6 +818,11 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       // Already hoisted — nothing to emit here
       Ok(e)
     }
+
+    ast.ForInStatement(left, right, body) -> emit_for_in(e, left, right, body)
+
+    ast.ForOfStatement(left, right, body, _is_await) ->
+      emit_for_of(e, left, right, body)
 
     _ -> Error(Unsupported("statement: " <> string_inspect_stmt_kind(stmt)))
   }
@@ -1286,6 +1305,160 @@ fn emit_sequence(
       let e = emit_ir(e, IrPop)
       emit_sequence(e, rest)
     }
+  }
+}
+
+// ============================================================================
+// For-in / for-of loops
+// ============================================================================
+
+/// Emit a for-in loop: `for (lhs in rhs) body`
+///
+/// Stack pattern:
+///   [obj] → ForInStart → [iterator]
+///   loop: ForInNext → [iterator, key, done]
+///   JumpIfTrue(cleanup) → [iterator, key]
+///   bind key → [iterator]
+///   body
+///   Jump(loop) → cleanup: Pop key → loop_end: Pop iterator
+fn emit_for_in(
+  e: Emitter,
+  left: ast.ForInit,
+  right: ast.Expression,
+  body: ast.Statement,
+) -> Result(Emitter, EmitError) {
+  let #(e, loop_start) = fresh_label(e)
+  let #(e, loop_continue) = fresh_label(e)
+  let #(e, cleanup) = fresh_label(e)
+  let #(e, loop_end) = fresh_label(e)
+
+  // Block scope for let/const
+  let e = emit_op(e, EnterScope(BlockScope))
+
+  // Evaluate the right-hand side (object to iterate)
+  use e <- result.try(emit_expr(e, right))
+  // ForInStart: pops object, pushes iterator ref
+  let e = emit_ir(e, IrForInStart)
+
+  let e = push_loop(e, loop_end, loop_continue)
+  let e = emit_ir(e, IrLabel(loop_start))
+
+  // ForInNext: peeks iterator, pushes key + done
+  let e = emit_ir(e, IrForInNext)
+  // If done, jump to cleanup (where we pop the unused key)
+  let e = emit_ir(e, IrJumpIfTrue(cleanup))
+
+  // Bind the key to the left-hand side variable
+  use e <- result.try(emit_for_lhs_bind(e, left))
+
+  // Body
+  use e <- result.try(emit_stmt(e, body))
+
+  // Continue point
+  let e = emit_ir(e, IrLabel(loop_continue))
+  let e = emit_ir(e, IrJump(loop_start))
+
+  // cleanup: pop the key (done=true left it on stack)
+  let e = emit_ir(e, IrLabel(cleanup))
+  let e = emit_ir(e, IrPop)
+
+  // loop_end: pop the iterator
+  let e = emit_ir(e, IrLabel(loop_end))
+  let e = emit_ir(e, IrPop)
+
+  let e = pop_loop(e)
+  let e = emit_op(e, LeaveScope)
+  Ok(e)
+}
+
+/// Emit a for-of loop: `for (lhs of rhs) body`
+///
+/// Same stack pattern as for-in but uses GetIterator/IteratorNext.
+fn emit_for_of(
+  e: Emitter,
+  left: ast.ForInit,
+  right: ast.Expression,
+  body: ast.Statement,
+) -> Result(Emitter, EmitError) {
+  let #(e, loop_start) = fresh_label(e)
+  let #(e, loop_continue) = fresh_label(e)
+  let #(e, cleanup) = fresh_label(e)
+  let #(e, loop_end) = fresh_label(e)
+
+  // Block scope for let/const
+  let e = emit_op(e, EnterScope(BlockScope))
+
+  // Evaluate the iterable
+  use e <- result.try(emit_expr(e, right))
+  // GetIterator: pops iterable, pushes iterator ref
+  let e = emit_ir(e, IrGetIterator)
+
+  let e = push_loop(e, loop_end, loop_continue)
+  let e = emit_ir(e, IrLabel(loop_start))
+
+  // IteratorNext: peeks iterator, pushes value + done
+  let e = emit_ir(e, IrIteratorNext)
+  // If done, jump to cleanup (where we pop the unused value)
+  let e = emit_ir(e, IrJumpIfTrue(cleanup))
+
+  // Bind the value to the left-hand side
+  use e <- result.try(emit_for_lhs_bind(e, left))
+
+  // Body
+  use e <- result.try(emit_stmt(e, body))
+
+  // Continue point
+  let e = emit_ir(e, IrLabel(loop_continue))
+  let e = emit_ir(e, IrJump(loop_start))
+
+  // cleanup: pop the value (done=true left it on stack)
+  let e = emit_ir(e, IrLabel(cleanup))
+  let e = emit_ir(e, IrPop)
+
+  // loop_end: pop the iterator
+  let e = emit_ir(e, IrLabel(loop_end))
+  let e = emit_ir(e, IrPop)
+
+  let e = pop_loop(e)
+  let e = emit_op(e, LeaveScope)
+  Ok(e)
+}
+
+/// Bind the current value (on top of stack) to the for-in/for-of LHS.
+/// The LHS can be:
+///   - ForInitDeclaration(VariableDeclaration(...)) e.g. `for (let x ...)`
+///   - ForInitExpression(Identifier(name)) e.g. `for (x ...)`
+///   - ForInitPattern(pattern) e.g. `for ({a, b} ...)`
+/// Consumes the value on top of stack.
+fn emit_for_lhs_bind(
+  e: Emitter,
+  left: ast.ForInit,
+) -> Result(Emitter, EmitError) {
+  case left {
+    ast.ForInitDeclaration(ast.VariableDeclaration(kind, declarators)) -> {
+      let binding_kind = case kind {
+        ast.Var -> VarBinding
+        ast.Let -> LetBinding
+        ast.Const -> ConstBinding
+      }
+      case declarators {
+        [ast.VariableDeclarator(pattern, _)] ->
+          emit_destructuring_bind(e, pattern, binding_kind)
+        _ -> Error(Unsupported("for-in/of with multiple declarators"))
+      }
+    }
+    ast.ForInitExpression(ast.Identifier(name)) -> {
+      Ok(emit_ir(e, IrScopePutVar(name)))
+    }
+    ast.ForInitExpression(ast.MemberExpression(obj, ast.Identifier(prop), False)) -> {
+      // e.g. for (obj.prop in ...) — rare but valid
+      use e <- result.try(emit_expr(e, obj))
+      let e = emit_ir(e, IrSwap)
+      Ok(emit_ir(e, IrPutField(prop)))
+    }
+    ast.ForInitPattern(pattern) ->
+      emit_destructuring_bind(e, pattern, VarBinding)
+    _ -> Error(Unsupported("for-in/of left-hand side"))
   }
 }
 

@@ -1,5 +1,6 @@
 import gleam/dict
 import gleam/int
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import lumen/vm/builtins.{type Builtins}
 import lumen/vm/heap.{type Heap}
@@ -103,6 +104,45 @@ pub fn set_property(heap: Heap, ref: Ref, key: String, val: JsValue) -> Heap {
         }
       }
     _ -> heap
+  }
+}
+
+/// Collect enumerable own property keys from an object.
+/// For arrays, includes numeric indices as strings plus any string properties.
+/// NOTE: Does NOT walk the prototype chain. We skip inherited properties because
+/// we lack property descriptors to distinguish enumerable from non-enumerable
+/// (e.g. Object.prototype.constructor should NOT appear in for-in output).
+pub fn enumerate_keys(heap: Heap, ref: Ref) -> List(String) {
+  case heap.read(heap, ref) {
+    Ok(ObjectSlot(kind:, properties:, elements:, ..)) -> {
+      // Collect element keys (for arrays: numeric indices in order)
+      let elem_keys = case kind {
+        ArrayObject(length:) -> collect_element_keys(elements, 0, length, [])
+        _ -> []
+      }
+      // Collect string property keys
+      let prop_keys = dict.keys(properties)
+      list.append(elem_keys, prop_keys)
+    }
+    _ -> []
+  }
+}
+
+fn collect_element_keys(
+  elements: dict.Dict(Int, JsValue),
+  idx: Int,
+  length: Int,
+  acc: List(String),
+) -> List(String) {
+  case idx >= length {
+    True -> list.reverse(acc)
+    False -> {
+      let key = int.to_string(idx)
+      case dict.has_key(elements, idx) {
+        True -> collect_element_keys(elements, idx + 1, length, [key, ..acc])
+        False -> collect_element_keys(elements, idx + 1, length, acc)
+      }
+    }
   }
 }
 
