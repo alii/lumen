@@ -1057,3 +1057,66 @@ pub fn constructor_non_object_prototype_fallback_test() {
     JsNumber(Finite(1.0)),
   )
 }
+
+// ============================================================================
+// Destructuring tests
+// ============================================================================
+
+pub fn object_destructuring_basic_test() {
+  assert_normal_number("let {a, b} = {a: 1, b: 2}; a + b", 3.0)
+}
+
+pub fn array_destructuring_basic_test() {
+  assert_normal_number("let [x, y] = [10, 20]; x + y", 30.0)
+}
+
+pub fn object_destructuring_default_used_test() {
+  assert_normal_number("let {a = 5} = {}; a", 5.0)
+}
+
+pub fn object_destructuring_default_not_used_test() {
+  assert_normal_number("let {a = 5} = {a: 42}; a", 42.0)
+}
+
+pub fn object_destructuring_rename_test() {
+  assert_normal_number("let {a: x} = {a: 99}; x", 99.0)
+}
+
+pub fn object_destructuring_nested_test() {
+  assert_normal_number("let {a: {b}} = {a: {b: 7}}; b", 7.0)
+}
+
+pub fn array_destructuring_nested_test() {
+  assert_normal_number("let [a, [b, c]] = [1, [2, 3]]; b", 2.0)
+}
+
+pub fn function_param_destructuring_test() {
+  assert_normal_number(
+    "function f({x, y}) { return x + y; } f({x: 3, y: 4})",
+    7.0,
+  )
+}
+
+pub fn var_destructuring_hoisting_test() {
+  assert_normal_number("var {a} = {a: 1}; a", 1.0)
+}
+
+pub fn array_destructuring_hole_test() {
+  assert_normal_number("let [, b] = [10, 20]; b", 20.0)
+}
+
+pub fn array_destructuring_default_test() {
+  assert_normal_number("let [a = 99] = []; a", 99.0)
+}
+
+pub fn const_destructuring_test() {
+  assert_normal_number("const {x, y} = {x: 3, y: 7}; x + y", 10.0)
+}
+
+pub fn nested_default_test() {
+  assert_normal_number("let {a: {b} = {b: 5}} = {}; b", 5.0)
+}
+
+pub fn arrow_param_destructuring_test() {
+  assert_normal_number("var f = ({a, b}) => a * b; f({a: 3, b: 4})", 12.0)
+}

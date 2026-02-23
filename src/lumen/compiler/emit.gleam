@@ -4,6 +4,7 @@
 /// mixed with scope markers. Variable references use string names (IrScopeGetVar),
 /// jump targets use integer label IDs (IrJump). These are resolved in Phase 2 and 3.
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import lumen/ast
@@ -290,11 +291,12 @@ fn emit_stmt_tail(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError)
           let e = emit_op(e, EnterScope(BlockScope))
 
           let e = case param {
-            Some(ast.IdentifierPattern(name)) -> {
-              let e = emit_op(e, DeclareVar(name, CatchBinding))
-              emit_ir(e, IrScopePutVar(name))
+            Some(pattern) -> {
+              case emit_destructuring_bind(e, pattern, CatchBinding) {
+                Ok(e) -> e
+                Error(_) -> e
+              }
             }
-            Some(_) -> e
             None -> emit_ir(e, IrPop)
           }
 
@@ -341,13 +343,35 @@ fn collect_hoisted_vars(stmts: List(ast.Statement)) -> List(String) {
   |> list.unique()
 }
 
+/// Recursively extract all bound variable names from a pattern.
+fn collect_pattern_names(pattern: ast.Pattern) -> List(String) {
+  case pattern {
+    ast.IdentifierPattern(name) -> [name]
+    ast.ArrayPattern(elements) ->
+      list.flat_map(elements, fn(elem) {
+        case elem {
+          Some(p) -> collect_pattern_names(p)
+          None -> []
+        }
+      })
+    ast.ObjectPattern(properties) ->
+      list.flat_map(properties, fn(prop) {
+        case prop {
+          ast.PatternProperty(_, value:, ..) -> collect_pattern_names(value)
+          ast.RestProperty(argument) -> collect_pattern_names(argument)
+        }
+      })
+    ast.AssignmentPattern(left, _) -> collect_pattern_names(left)
+    ast.RestElement(argument) -> collect_pattern_names(argument)
+  }
+}
+
 fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
   case stmt {
     ast.VariableDeclaration(ast.Var, declarators) ->
-      list.filter_map(declarators, fn(d) {
+      list.flat_map(declarators, fn(d) {
         case d {
-          ast.VariableDeclarator(ast.IdentifierPattern(name), _) -> Ok(name)
-          _ -> Error(Nil)
+          ast.VariableDeclarator(pattern, _) -> collect_pattern_names(pattern)
         }
       })
     ast.BlockStatement(body) -> list.flat_map(body, collect_vars_stmt)
@@ -364,10 +388,10 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
     ast.ForStatement(init, _, _, body) -> {
       let init_vars = case init {
         Some(ast.ForInitDeclaration(ast.VariableDeclaration(ast.Var, decls))) ->
-          list.filter_map(decls, fn(d) {
+          list.flat_map(decls, fn(d) {
             case d {
-              ast.VariableDeclarator(ast.IdentifierPattern(name), _) -> Ok(name)
-              _ -> Error(Nil)
+              ast.VariableDeclarator(pattern, _) ->
+                collect_pattern_names(pattern)
             }
           })
         _ -> []
@@ -443,14 +467,31 @@ fn compile_function_body(
 
   let e = emit_op(e, EnterScope(FunctionScope))
 
-  // Declare parameters
-  let e =
-    list.fold(params, e, fn(e, param) {
+  // Phase 1: Declare parameters (identifier or synthetic for destructuring)
+  let #(e, destructured_params) =
+    list.index_fold(params, #(e, []), fn(acc, param, idx) {
+      let #(e, destr) = acc
       case param {
-        ast.IdentifierPattern(pname) ->
-          emit_op(e, DeclareVar(pname, ParamBinding))
-        _ -> e
-        // Non-identifier params not in MVP
+        ast.IdentifierPattern(pname) -> #(
+          emit_op(e, DeclareVar(pname, ParamBinding)),
+          destr,
+        )
+        _ -> {
+          let synthetic = "$param_" <> int.to_string(idx)
+          let e = emit_op(e, DeclareVar(synthetic, ParamBinding))
+          #(e, list.append(destr, [#(synthetic, param)]))
+        }
+      }
+    })
+
+  // Phase 2: Emit destructuring for non-identifier params
+  let e =
+    list.fold(destructured_params, e, fn(e, dp) {
+      let #(synthetic, pattern) = dp
+      let e = emit_ir(e, IrScopeGetVar(synthetic))
+      case emit_destructuring_bind(e, pattern, LetBinding) {
+        Ok(e) -> e
+        Error(_) -> e
       }
     })
 
@@ -551,7 +592,14 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
               None -> Ok(e)
             }
           }
-          _ -> Error(Unsupported("destructuring patterns"))
+          // Destructuring patterns
+          ast.VariableDeclarator(pattern, init) -> {
+            use e <- result.try(case init {
+              Some(init_expr) -> emit_expr(e, init_expr)
+              None -> Ok(push_const(e, JsUndefined))
+            })
+            emit_destructuring_bind(e, pattern, binding_kind)
+          }
         }
       })
     }
@@ -708,14 +756,13 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 
           // Bind catch parameter (thrown value is on stack from unwind)
           let e = case param {
-            Some(ast.IdentifierPattern(name)) -> {
-              let e = emit_op(e, DeclareVar(name, CatchBinding))
-              emit_ir(e, IrScopePutVar(name))
+            Some(pattern) -> {
+              case emit_destructuring_bind(e, pattern, CatchBinding) {
+                Ok(e) -> e
+                Error(_) -> e
+              }
             }
-            Some(_) -> e
-            // Non-identifier catch param not in MVP
             None -> emit_ir(e, IrPop)
-            // No param, discard thrown value
           }
 
           use e <- result.try(emit_stmt(e, catch_body))
@@ -1238,6 +1285,131 @@ fn emit_sequence(
       use e <- result.try(emit_expr(e, first))
       let e = emit_ir(e, IrPop)
       emit_sequence(e, rest)
+    }
+  }
+}
+
+// ============================================================================
+// Destructuring patterns
+// ============================================================================
+
+/// Emit code to destructure a value on top of stack into a pattern.
+/// Consumes the value (pops it when done).
+fn emit_destructuring_bind(
+  e: Emitter,
+  pattern: ast.Pattern,
+  binding_kind: BindingKind,
+) -> Result(Emitter, EmitError) {
+  case pattern {
+    ast.IdentifierPattern(name) -> {
+      let e = case binding_kind {
+        LetBinding | ConstBinding | ParamBinding | CatchBinding ->
+          emit_op(e, DeclareVar(name, binding_kind))
+        VarBinding | CaptureBinding -> e
+      }
+      Ok(emit_ir(e, IrScopePutVar(name)))
+    }
+
+    ast.ObjectPattern(properties) ->
+      emit_object_destructure(e, properties, binding_kind)
+
+    ast.ArrayPattern(elements) ->
+      emit_array_destructure(e, elements, binding_kind)
+
+    ast.AssignmentPattern(left, default_expr) -> {
+      // Check if value === undefined, if so use default
+      let #(e, has_val) = fresh_label(e)
+      let e = emit_ir(e, IrDup)
+      let e = push_const(e, JsUndefined)
+      let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+      let e = emit_ir(e, IrJumpIfFalse(has_val))
+      // Value is undefined — pop it and use default
+      let e = emit_ir(e, IrPop)
+      use e <- result.try(emit_expr(e, default_expr))
+      let e = emit_ir(e, IrLabel(has_val))
+      // Now the value (original or default) is on stack
+      emit_destructuring_bind(e, left, binding_kind)
+    }
+
+    ast.RestElement(_) -> {
+      let _e = emit_ir(e, IrPop)
+      Error(Unsupported("rest element in destructuring"))
+    }
+  }
+}
+
+/// Destructure an object: for each property, Dup obj, GetField, recurse; then Pop obj.
+fn emit_object_destructure(
+  e: Emitter,
+  properties: List(ast.PatternProperty),
+  binding_kind: BindingKind,
+) -> Result(Emitter, EmitError) {
+  use e <- result.map(emit_object_props(e, properties, binding_kind))
+  emit_ir(e, IrPop)
+}
+
+fn emit_object_props(
+  e: Emitter,
+  properties: List(ast.PatternProperty),
+  binding_kind: BindingKind,
+) -> Result(Emitter, EmitError) {
+  case properties {
+    [] -> Ok(e)
+    [prop, ..rest] -> {
+      use e <- result.try(emit_single_object_prop(e, prop, binding_kind))
+      emit_object_props(e, rest, binding_kind)
+    }
+  }
+}
+
+fn emit_single_object_prop(
+  e: Emitter,
+  prop: ast.PatternProperty,
+  binding_kind: BindingKind,
+) -> Result(Emitter, EmitError) {
+  case prop {
+    ast.PatternProperty(key:, value:, computed: False, ..) -> {
+      let field_name = case key {
+        ast.Identifier(name) -> Ok(name)
+        ast.StringExpression(name) -> Ok(name)
+        _ -> Error(Unsupported("computed property key in destructuring"))
+      }
+      use name <- result.try(field_name)
+      let e = emit_ir(e, IrDup)
+      let e = emit_ir(e, IrGetField(name))
+      emit_destructuring_bind(e, value, binding_kind)
+    }
+    ast.PatternProperty(computed: True, ..) ->
+      Error(Unsupported("computed property in destructuring"))
+    ast.RestProperty(_) -> Error(Unsupported("rest property in destructuring"))
+  }
+}
+
+/// Destructure an array: for each element, Dup arr, PushConst(index), GetElem, recurse; then Pop arr.
+fn emit_array_destructure(
+  e: Emitter,
+  elements: List(Option(ast.Pattern)),
+  binding_kind: BindingKind,
+) -> Result(Emitter, EmitError) {
+  use e <- result.map(emit_array_elements(e, elements, 0, binding_kind))
+  emit_ir(e, IrPop)
+}
+
+fn emit_array_elements(
+  e: Emitter,
+  elements: List(Option(ast.Pattern)),
+  index: Int,
+  binding_kind: BindingKind,
+) -> Result(Emitter, EmitError) {
+  case elements {
+    [] -> Ok(e)
+    [None, ..rest] -> emit_array_elements(e, rest, index + 1, binding_kind)
+    [Some(pattern), ..rest] -> {
+      let e = emit_ir(e, IrDup)
+      let e = push_const(e, JsNumber(Finite(int.to_float(index))))
+      let e = emit_ir(e, IrGetElem)
+      use e <- result.try(emit_destructuring_bind(e, pattern, binding_kind))
+      emit_array_elements(e, rest, index + 1, binding_kind)
     }
   }
 }
