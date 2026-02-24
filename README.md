@@ -2,7 +2,7 @@
 
 (Highly experimental) JavaScript on the BEAM
 
-![test262 conformance chart](.github/test262/conformance.png)
+![js](./.github/js.png)
 
 ## Development
 
@@ -22,3 +22,5 @@ TEST262_EXEC=1 RESULTS_FILE=results.json gleam test
 # Run parser-only test262 (faster, parse conformance only)
 TEST262=1 gleam test
 ```
+
+![test262 conformance chart](.github/test262/conformance.png)

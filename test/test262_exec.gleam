@@ -12,7 +12,6 @@ import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/value
 import arc/vm/vm
-import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
@@ -206,6 +205,7 @@ fn run_runtime_negative_test(
     // Normal completion — bad, should have thrown
     Ok(vm.NormalCompletion(_, _)) ->
       Fail("expected runtime throw but completed normally")
+    Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
     // Parse/compile error — also counts as "didn't throw at runtime"
     Error(reason) -> Fail("expected runtime throw but got: " <> reason)
   }
@@ -218,6 +218,7 @@ fn run_positive_test(metadata: TestMetadata, source: String) -> TestOutcome {
     Ok(vm.NormalCompletion(_, _)) -> Pass
     Ok(vm.ThrowCompletion(thrown, _)) ->
       Fail("unexpected throw: " <> inspect_js_value(thrown))
+    Ok(vm.YieldCompletion(_, _)) -> Fail("unexpected YieldCompletion")
     Error(reason) -> Fail(reason)
   }
 }
@@ -252,41 +253,14 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let globals = make_test262_globals(b)
-          case vm.run_with_globals(template, h, b, globals) {
+          let #(h, globals) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
           }
         }
       }
   }
-}
-
-/// Pre-populated globals for test262 execution.
-fn make_test262_globals(
-  b: builtins.Builtins,
-) -> dict.Dict(String, value.JsValue) {
-  dict.from_list([
-    #("NaN", value.JsNumber(value.NaN)),
-    #("Infinity", value.JsNumber(value.Infinity)),
-    #("undefined", value.JsUndefined),
-    #("Object", value.JsObject(b.object.constructor)),
-    #("Function", value.JsObject(b.function.constructor)),
-    #("Array", value.JsObject(b.array.constructor)),
-    #("Error", value.JsObject(b.error.constructor)),
-    #("TypeError", value.JsObject(b.type_error.constructor)),
-    #("ReferenceError", value.JsObject(b.reference_error.constructor)),
-    #("RangeError", value.JsObject(b.range_error.constructor)),
-    #("SyntaxError", value.JsObject(b.syntax_error.constructor)),
-    #("Math", value.JsObject(b.math)),
-    #("String", value.JsObject(b.string.constructor)),
-    #("Number", value.JsObject(b.number.constructor)),
-    #("Boolean", value.JsObject(b.boolean.constructor)),
-    #("parseInt", value.JsObject(b.parse_int)),
-    #("parseFloat", value.JsObject(b.parse_float)),
-    #("isNaN", value.JsObject(b.is_nan)),
-    #("isFinite", value.JsObject(b.is_finite)),
-  ])
 }
 
 /// Prepend harness files to test source.

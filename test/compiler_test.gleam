@@ -3,11 +3,12 @@ import arc/parser
 import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/value.{
-  Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined, NaN,
+  Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
 }
 import arc/vm/vm
 import gleam/dict
 import gleam/int
+import gleam/set
 import gleam/string
 
 // ============================================================================
@@ -29,34 +30,94 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
         Ok(template) -> {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
-          let globals =
-            dict.from_list([
-              #("NaN", value.JsNumber(value.NaN)),
-              #("Infinity", value.JsNumber(value.Infinity)),
-              #("undefined", JsUndefined),
-              #("Object", JsObject(b.object.constructor)),
-              #("Function", JsObject(b.function.constructor)),
-              #("Array", JsObject(b.array.constructor)),
-              #("Error", JsObject(b.error.constructor)),
-              #("TypeError", JsObject(b.type_error.constructor)),
-              #("ReferenceError", JsObject(b.reference_error.constructor)),
-              #("RangeError", JsObject(b.range_error.constructor)),
-              #("SyntaxError", JsObject(b.syntax_error.constructor)),
-              #("Math", JsObject(b.math)),
-              #("String", JsObject(b.string.constructor)),
-              #("Number", JsObject(b.number.constructor)),
-              #("Boolean", JsObject(b.boolean.constructor)),
-              #("parseInt", JsObject(b.parse_int)),
-              #("parseFloat", JsObject(b.parse_float)),
-              #("isNaN", JsObject(b.is_nan)),
-              #("isFinite", JsObject(b.is_finite)),
-            ])
+          let #(h, globals) = builtins.globals(b, h)
           case vm.run_with_globals(template, h, b, globals) {
             Ok(completion) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
         }
       }
+  }
+}
+
+/// Like run_js but drains the promise job queue after script completes.
+fn run_js_drain(source: String) -> Result(vm.Completion, String) {
+  case parser.parse(source, parser.Script) {
+    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
+    Ok(program) ->
+      case compiler.compile(program) {
+        Error(compiler.Unsupported(desc)) ->
+          Error("compile error: unsupported " <> desc)
+        Error(compiler.BreakOutsideLoop) ->
+          Error("compile error: break outside loop")
+        Error(compiler.ContinueOutsideLoop) ->
+          Error("compile error: continue outside loop")
+        Ok(template) -> {
+          let h = heap.new()
+          let #(h, b) = builtins.init(h)
+          let #(h, globals) = builtins.globals(b, h)
+          case vm.run_and_drain(template, h, b, globals) {
+            Ok(completion) -> Ok(completion)
+            Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
+          }
+        }
+      }
+  }
+}
+
+/// Assert that the script returns a promise, drain completes, and the promise
+/// is fulfilled with the expected value.
+fn assert_promise_resolves(source: String, expected: value.JsValue) {
+  case run_js_drain(source) {
+    Ok(vm.NormalCompletion(val, h)) ->
+      case vm.promise_result(h, val) {
+        Ok(resolved) -> {
+          assert resolved == expected
+        }
+        Error(_) ->
+          panic as {
+            "expected fulfilled promise, got: "
+            <> string.inspect(val)
+            <> " for: "
+            <> source
+          }
+      }
+    Ok(vm.ThrowCompletion(val, _)) ->
+      panic as {
+        "expected NormalCompletion, got ThrowCompletion("
+        <> string.inspect(val)
+        <> ") for: "
+        <> source
+      }
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Error(err) -> panic as { "error for: " <> source <> " — " <> err }
+  }
+}
+
+fn assert_promise_rejects(source: String, expected: value.JsValue) {
+  case run_js_drain(source) {
+    Ok(vm.NormalCompletion(val, h)) ->
+      case vm.promise_result(h, val) {
+        Ok(rejected) -> {
+          assert rejected == expected
+        }
+        Error(_) ->
+          panic as {
+            "expected rejected promise, got: "
+            <> string.inspect(val)
+            <> " for: "
+            <> source
+          }
+      }
+    Ok(vm.ThrowCompletion(val, _)) ->
+      panic as {
+        "expected NormalCompletion, got ThrowCompletion("
+        <> string.inspect(val)
+        <> ") for: "
+        <> source
+      }
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
 
@@ -79,6 +140,7 @@ fn assert_normal(source: String, expected: value.JsValue) {
       panic as {
         "expected NormalCompletion, got ThrowCompletion for: " <> source
       }
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -97,6 +159,7 @@ fn assert_thrown(source: String) {
         <> ") for: "
         <> source
       }
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
     Error(err) -> panic as { "error for: " <> source <> " — " <> err }
   }
 }
@@ -352,6 +415,38 @@ pub fn object_property_undefined_test() {
 }
 
 // ============================================================================
+// Optional chaining tests
+// ============================================================================
+
+pub fn optional_chaining_dot_test() {
+  assert_normal_number("var obj = {x: 42}; obj?.x", 42.0)
+}
+
+pub fn optional_chaining_null_test() {
+  assert_normal("var obj = null; obj?.x", JsUndefined)
+}
+
+pub fn optional_chaining_undefined_test() {
+  assert_normal("var obj = undefined; obj?.x", JsUndefined)
+}
+
+pub fn optional_chaining_computed_test() {
+  assert_normal_number("var obj = {x: 10}; obj?.['x']", 10.0)
+}
+
+pub fn optional_chaining_computed_null_test() {
+  assert_normal("var obj = null; obj?.['x']", JsUndefined)
+}
+
+pub fn optional_call_test() {
+  assert_normal_number("var fn = function() { return 5; }; fn?.()", 5.0)
+}
+
+pub fn optional_call_null_test() {
+  assert_normal("var fn = null; fn?.()", JsUndefined)
+}
+
+// ============================================================================
 // Expression statement result tests
 // ============================================================================
 
@@ -390,6 +485,46 @@ pub fn try_catch_basic_test() {
 
 pub fn try_no_throw_test() {
   assert_normal_number("var x = 0; try { x = 1; } catch(e) { x = 2; } x", 1.0)
+}
+
+pub fn try_finally_normal_test() {
+  assert_normal_number("var x = 0; try { x = 1; } finally { x = 10; } x", 10.0)
+}
+
+pub fn try_finally_throw_test() {
+  // Finally runs even when exception is thrown, then re-throws
+  case run_js("var x = 0; try { x = 1; throw 42; } finally { x = 10; }") {
+    Ok(vm.ThrowCompletion(JsNumber(Finite(42.0)), _)) -> Nil
+    other ->
+      panic as { "expected ThrowCompletion(42): " <> string.inspect(other) }
+  }
+}
+
+pub fn try_catch_finally_normal_test() {
+  assert_normal_number(
+    "var x = 0; try { x = 1; } catch(e) { x = 2; } finally { x = x + 10; } x",
+    11.0,
+  )
+}
+
+pub fn try_catch_finally_caught_test() {
+  assert_normal_number(
+    "var x = 0; try { throw 5; } catch(e) { x = e; } finally { x = x + 10; } x",
+    15.0,
+  )
+}
+
+pub fn try_catch_finally_rethrow_test() {
+  // If catch re-throws, finally still runs, then the exception propagates
+  case
+    run_js(
+      "var x = 0; try { throw 42; } catch(e) { throw e + 1; } finally { x = 99; }",
+    )
+  {
+    Ok(vm.ThrowCompletion(JsNumber(Finite(43.0)), _)) -> Nil
+    other ->
+      panic as { "expected ThrowCompletion(43): " <> string.inspect(other) }
+  }
 }
 
 // ============================================================================
@@ -2346,4 +2481,1087 @@ pub fn number_is_integer_nan_test() {
 
 pub fn number_is_integer_infinity_test() {
   assert_normal("Number.isInteger(Infinity)", JsBool(False))
+}
+
+// ============================================================================
+// Class Inheritance Tests
+// ============================================================================
+
+pub fn class_extends_basic_test() {
+  assert_normal(
+    "class Animal { constructor(name) { this.name = name; } }
+     class Dog extends Animal { constructor(name) { super(name); this.type = 'dog'; } }
+     var d = new Dog('Rex');
+     d.name",
+    JsString("Rex"),
+  )
+}
+
+pub fn class_extends_type_field_test() {
+  assert_normal(
+    "class Animal { constructor(name) { this.name = name; } }
+     class Dog extends Animal { constructor(name) { super(name); this.type = 'dog'; } }
+     var d = new Dog('Rex');
+     d.type",
+    JsString("dog"),
+  )
+}
+
+pub fn class_extends_method_inheritance_test() {
+  assert_normal(
+    "class Animal {
+       constructor(name) { this.name = name; }
+       speak() { return this.name + ' makes a noise'; }
+     }
+     class Dog extends Animal {
+       constructor(name) { super(name); }
+     }
+     var d = new Dog('Rex');
+     d.speak()",
+    JsString("Rex makes a noise"),
+  )
+}
+
+pub fn class_extends_method_override_test() {
+  assert_normal(
+    "class Animal {
+       constructor(name) { this.name = name; }
+       speak() { return 'generic noise'; }
+     }
+     class Dog extends Animal {
+       constructor(name) { super(name); }
+       speak() { return this.name + ' barks'; }
+     }
+     var d = new Dog('Rex');
+     d.speak()",
+    JsString("Rex barks"),
+  )
+}
+
+pub fn class_extends_instanceof_child_test() {
+  assert_normal(
+    "class Animal { constructor() {} }
+     class Dog extends Animal { constructor() { super(); } }
+     var d = new Dog();
+     d instanceof Dog",
+    JsBool(True),
+  )
+}
+
+pub fn class_extends_instanceof_parent_test() {
+  assert_normal(
+    "class Animal { constructor() {} }
+     class Dog extends Animal { constructor() { super(); } }
+     var d = new Dog();
+     d instanceof Animal",
+    JsBool(True),
+  )
+}
+
+pub fn class_extends_super_with_args_test() {
+  assert_normal(
+    "class Base { constructor(x, y) { this.sum = x + y; } }
+     class Child extends Base { constructor(x, y) { super(x, y); } }
+     var c = new Child(3, 4);
+     c.sum",
+    JsNumber(Finite(7.0)),
+  )
+}
+
+pub fn class_extends_default_constructor_test() {
+  // When no constructor is provided, a default one that calls super() is synthesized
+  assert_normal(
+    "class Base { constructor() { this.x = 42; } }
+     class Child extends Base {}
+     var c = new Child();
+     c.x",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn class_extends_static_method_test() {
+  assert_normal(
+    "class Base {
+       static greet() { return 'hello'; }
+     }
+     class Child extends Base {
+       constructor() { super(); }
+     }
+     Child.greet()",
+    JsString("hello"),
+  )
+}
+
+pub fn class_extends_this_tdz_test() {
+  // Accessing this before super() should throw ReferenceError
+  assert_thrown(
+    "class Base { constructor() {} }
+     class Child extends Base {
+       constructor() { this.x = 1; super(); }
+     }
+     new Child()",
+  )
+}
+
+pub fn class_extends_no_super_return_test() {
+  // Returning from derived constructor without calling super() should throw
+  assert_thrown(
+    "class Base { constructor() {} }
+     class Child extends Base {
+       constructor() { }
+     }
+     new Child()",
+  )
+}
+
+pub fn class_extends_multi_level_test() {
+  assert_normal(
+    "class A { constructor() { this.a = 1; } }
+     class B extends A { constructor() { super(); this.b = 2; } }
+     class C extends B { constructor() { super(); this.c = 3; } }
+     var obj = new C();
+     obj.a + obj.b + obj.c",
+    JsNumber(Finite(6.0)),
+  )
+}
+
+pub fn class_extends_multi_level_method_test() {
+  assert_normal(
+    "class A {
+       constructor() {}
+       foo() { return 'A'; }
+     }
+     class B extends A {
+       constructor() { super(); }
+     }
+     class C extends B {
+       constructor() { super(); }
+     }
+     var c = new C();
+     c.foo()",
+    JsString("A"),
+  )
+}
+
+pub fn class_extends_expression_test() {
+  // class expression with extends
+  assert_normal(
+    "class Base { constructor() { this.x = 10; } }
+     var Child = class extends Base { constructor() { super(); } };
+     var c = new Child();
+     c.x",
+    JsNumber(Finite(10.0)),
+  )
+}
+
+// ============================================================================
+// Promise tests
+// ============================================================================
+
+pub fn promise_typeof_test() {
+  assert_normal("typeof Promise", JsString("function"))
+}
+
+pub fn promise_resolve_typeof_test() {
+  assert_normal("typeof Promise.resolve", JsString("function"))
+}
+
+pub fn promise_reject_typeof_test() {
+  assert_normal("typeof Promise.reject", JsString("function"))
+}
+
+pub fn promise_resolve_basic_test() {
+  // Promise.resolve returns a fulfilled promise
+  assert_promise_resolves("Promise.resolve(42)", JsNumber(Finite(42.0)))
+}
+
+pub fn promise_reject_basic_test() {
+  assert_promise_rejects("Promise.reject('err')", JsString("err"))
+}
+
+pub fn promise_resolve_then_test() {
+  // .then transforms the value; returns a new promise with the result
+  assert_promise_resolves(
+    "Promise.resolve(1).then(function(x) { return x + 1; })",
+    JsNumber(Finite(2.0)),
+  )
+}
+
+pub fn promise_chaining_test() {
+  assert_promise_resolves(
+    "Promise.resolve(1)
+       .then(function(x) { return x + 1; })
+       .then(function(x) { return x + 1; })",
+    JsNumber(Finite(3.0)),
+  )
+}
+
+pub fn promise_reject_catch_test() {
+  assert_promise_resolves(
+    "Promise.reject('e').catch(function(e) { return e; })",
+    JsString("e"),
+  )
+}
+
+pub fn promise_then_throw_catch_test() {
+  assert_promise_resolves(
+    "Promise.resolve(1)
+       .then(function() { throw 'fail'; })
+       .catch(function(e) { return e; })",
+    JsString("fail"),
+  )
+}
+
+pub fn promise_constructor_resolve_test() {
+  assert_promise_resolves(
+    "new Promise(function(resolve) { resolve(99); })",
+    JsNumber(Finite(99.0)),
+  )
+}
+
+pub fn promise_constructor_then_test() {
+  assert_promise_resolves(
+    "new Promise(function(resolve) { resolve(99); })
+       .then(function(x) { return x + 1; })",
+    JsNumber(Finite(100.0)),
+  )
+}
+
+pub fn promise_constructor_reject_test() {
+  assert_promise_rejects(
+    "new Promise(function(_, reject) { reject('no'); })",
+    JsString("no"),
+  )
+}
+
+pub fn promise_constructor_reject_catch_test() {
+  assert_promise_resolves(
+    "new Promise(function(_, reject) { reject('no'); })
+       .catch(function(e) { return e; })",
+    JsString("no"),
+  )
+}
+
+pub fn promise_constructor_throws_test() {
+  assert_promise_rejects(
+    "new Promise(function() { throw 'boom'; })",
+    JsString("boom"),
+  )
+}
+
+pub fn promise_constructor_throws_catch_test() {
+  assert_promise_resolves(
+    "new Promise(function() { throw 'boom'; })
+       .catch(function(e) { return e; })",
+    JsString("boom"),
+  )
+}
+
+pub fn promise_multiple_resolve_test() {
+  assert_promise_resolves(
+    "new Promise(function(resolve, reject) {
+       resolve(1); resolve(2); reject(3);
+     })",
+    JsNumber(Finite(1.0)),
+  )
+}
+
+pub fn promise_thenable_resolution_test() {
+  assert_promise_resolves(
+    "Promise.resolve(Promise.resolve(42))",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn promise_constructor_not_function_test() {
+  assert_thrown("new Promise(123)")
+}
+
+pub fn promise_reject_propagation_test() {
+  // Rejection propagates through .then with no reject handler, caught by .catch
+  assert_promise_resolves(
+    "Promise.reject('err')
+       .then(function(x) { return 'wrong'; })
+       .catch(function(e) { return e; })",
+    JsString("err"),
+  )
+}
+
+pub fn promise_resolve_identity_test() {
+  // Promise.resolve on a non-thenable returns a fulfilled promise
+  assert_promise_resolves("Promise.resolve('hello')", JsString("hello"))
+}
+
+pub fn promise_then_identity_test() {
+  // .then with no handlers passes through the value
+  assert_promise_resolves("Promise.resolve(42).then()", JsNumber(Finite(42.0)))
+}
+
+pub fn promise_finally_passthrough_test() {
+  // .finally preserves the resolved value
+  assert_promise_resolves(
+    "Promise.resolve(42).finally(function() {}).then(function(x) { return x })",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn promise_finally_reject_passthrough_test() {
+  // .finally preserves the rejection reason
+  assert_promise_rejects(
+    "Promise.reject('err').finally(function() {})",
+    JsString("err"),
+  )
+}
+
+pub fn promise_finally_return_ignored_test() {
+  // .finally callback's return value is ignored (original value preserved)
+  assert_promise_resolves(
+    "Promise.resolve(42).finally(function() { return 99 })",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn promise_finally_non_callable_test() {
+  // .finally with non-callable passes through
+  assert_promise_resolves(
+    "Promise.resolve(42).finally(undefined)",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+// ============================================================================
+// Generators
+// ============================================================================
+
+pub fn generator_basic_test() {
+  // Basic generator: yield values, then done
+  assert_normal_number(
+    "function* g() { yield 1; yield 2; yield 3; }
+     var it = g();
+     var a = it.next();
+     a.value",
+    1.0,
+  )
+}
+
+pub fn generator_next_value_test() {
+  // .next() returns {value, done} objects
+  assert_normal(
+    "function* g() { yield 1; yield 2; }
+     var it = g();
+     it.next().done",
+    JsBool(False),
+  )
+}
+
+pub fn generator_done_test() {
+  // After all yields, done is true
+  assert_normal(
+    "function* g() { yield 1; }
+     var it = g();
+     it.next();
+     it.next().done",
+    JsBool(True),
+  )
+}
+
+pub fn generator_return_value_test() {
+  // Return value appears as final {value, done: true}
+  assert_normal_number(
+    "function* g() { yield 1; return 42; }
+     var it = g();
+     it.next();
+     it.next().value",
+    42.0,
+  )
+}
+
+pub fn generator_next_sends_value_test() {
+  // .next(val) sends val as the result of yield
+  assert_normal_number(
+    "function* g() { var x = yield 1; yield x + 10; }
+     var it = g();
+     it.next();
+     it.next(5).value",
+    15.0,
+  )
+}
+
+pub fn generator_multiple_yields_test() {
+  // Multiple yields produce sequential values
+  assert_normal_number(
+    "function* count() { yield 1; yield 2; yield 3; }
+     var it = count();
+     var sum = 0;
+     sum += it.next().value;
+     sum += it.next().value;
+     sum += it.next().value;
+     sum",
+    6.0,
+  )
+}
+
+pub fn generator_completed_next_test() {
+  // Calling .next() on completed generator returns {value: undefined, done: true}
+  assert_normal(
+    "function* g() { yield 1; }
+     var it = g();
+     it.next();
+     it.next();
+     it.next().value",
+    JsUndefined,
+  )
+}
+
+pub fn generator_return_method_test() {
+  // .return(val) completes the generator with {value: val, done: true}
+  assert_normal_number(
+    "function* g() { yield 1; yield 2; yield 3; }
+     var it = g();
+     it.next();
+     it.return(42).value",
+    42.0,
+  )
+}
+
+pub fn generator_return_method_done_test() {
+  // .return() marks generator as done
+  assert_normal(
+    "function* g() { yield 1; yield 2; }
+     var it = g();
+     it.next();
+     it.return(42).done",
+    JsBool(True),
+  )
+}
+
+pub fn generator_return_then_next_test() {
+  // After .return(), subsequent .next() returns {value: undefined, done: true}
+  assert_normal(
+    "function* g() { yield 1; yield 2; }
+     var it = g();
+     it.next();
+     it.return(42);
+     it.next().done",
+    JsBool(True),
+  )
+}
+
+pub fn generator_throw_method_test() {
+  // .throw() can be caught inside the generator
+  assert_normal_number(
+    "function* g() {
+       try { yield 1; } catch(e) { yield e + 10; }
+     }
+     var it = g();
+     it.next();
+     it.throw(5).value",
+    15.0,
+  )
+}
+
+pub fn generator_throw_uncaught_test() {
+  // .throw() with no catch propagates
+  assert_thrown(
+    "function* g() { yield 1; yield 2; }
+     var it = g();
+     it.next();
+     it.throw(42);",
+  )
+}
+
+pub fn generator_return_with_finally_test() {
+  // .return() runs finally blocks
+  assert_normal_number(
+    "var cleanup = 0;
+     function* g() {
+       try { yield 1; yield 2; }
+       finally { cleanup = 99; }
+     }
+     var it = g();
+     it.next();
+     it.return(42);
+     cleanup",
+    99.0,
+  )
+}
+
+pub fn generator_expression_test() {
+  // Generator expressions work too
+  assert_normal_number(
+    "var g = function*() { yield 10; yield 20; };
+     var it = g();
+     it.next().value + it.next().value",
+    30.0,
+  )
+}
+
+pub fn generator_with_params_test() {
+  // Generator functions accept parameters
+  assert_normal_number(
+    "function* range(start, end) {
+       for (var i = start; i < end; i++) { yield i; }
+     }
+     var it = range(3, 6);
+     var sum = 0;
+     var r = it.next();
+     while (!r.done) { sum += r.value; r = it.next(); }
+     sum",
+    12.0,
+  )
+}
+
+pub fn generator_closure_test() {
+  // Generators capture closure variables
+  assert_normal_number(
+    "function makeGen(x) {
+       return function*() { yield x; yield x * 2; };
+     }
+     var it = makeGen(5)();
+     it.next().value + it.next().value",
+    15.0,
+  )
+}
+
+pub fn generator_for_of_test() {
+  // for-of loop over a generator
+  assert_normal_number(
+    "function* g() { yield 1; yield 2; yield 3; }
+     var sum = 0;
+     for (var x of g()) sum += x;
+     sum",
+    6.0,
+  )
+}
+
+pub fn generator_for_of_break_test() {
+  // for-of with break exits early
+  assert_normal_number(
+    "function* g() { yield 1; yield 2; yield 3; yield 4; }
+     var sum = 0;
+     for (var x of g()) { if (x > 2) break; sum += x; }
+     sum",
+    3.0,
+  )
+}
+
+pub fn generator_fibonacci_test() {
+  // Classic fibonacci generator
+  assert_normal_number(
+    "function* fib() {
+       var a = 0, b = 1;
+       while (true) { yield a; var t = a + b; a = b; b = t; }
+     }
+     var it = fib();
+     var result;
+     for (var i = 0; i < 10; i++) result = it.next().value;
+     result",
+    34.0,
+  )
+}
+
+// ============================================================================
+// Async/Await tests
+// ============================================================================
+
+pub fn async_return_value_test() {
+  // Async function that returns a value resolves the promise
+  assert_promise_resolves(
+    "async function f() { return 42; } f()",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn async_return_undefined_test() {
+  // Async function with no return resolves to undefined
+  assert_promise_resolves("async function f() {} f()", JsUndefined)
+}
+
+pub fn async_await_resolved_promise_test() {
+  // Await a resolved promise
+  assert_promise_resolves(
+    "async function f() { return await Promise.resolve(10); } f()",
+    JsNumber(Finite(10.0)),
+  )
+}
+
+pub fn async_await_plain_value_test() {
+  // Await a non-promise value wraps it in Promise.resolve
+  assert_promise_resolves(
+    "async function f() { return await 5; } f()",
+    JsNumber(Finite(5.0)),
+  )
+}
+
+pub fn async_multiple_awaits_test() {
+  // Multiple sequential awaits
+  assert_promise_resolves(
+    "async function f() {
+       var a = await Promise.resolve(1);
+       var b = await Promise.resolve(2);
+       return a + b;
+     }
+     f()",
+    JsNumber(Finite(3.0)),
+  )
+}
+
+pub fn async_await_chain_test() {
+  // Await inside expression
+  assert_promise_resolves(
+    "async function f() {
+       return await Promise.resolve(3) + await Promise.resolve(4);
+     }
+     f()",
+    JsNumber(Finite(7.0)),
+  )
+}
+
+pub fn async_throw_rejects_test() {
+  // Async function that throws rejects the promise
+  assert_promise_rejects(
+    "async function f() { throw 'error'; } f()",
+    JsString("error"),
+  )
+}
+
+pub fn async_await_rejected_test() {
+  // Await a rejected promise without try/catch rejects the outer promise
+  assert_promise_rejects(
+    "async function f() { return await Promise.reject('fail'); } f()",
+    JsString("fail"),
+  )
+}
+
+pub fn async_try_catch_test() {
+  // Try/catch inside async function catches rejected await
+  assert_promise_resolves(
+    "async function f() {
+       try {
+         await Promise.reject('oops');
+       } catch (e) {
+         return 'caught: ' + e;
+       }
+     }
+     f()",
+    JsString("caught: oops"),
+  )
+}
+
+pub fn async_expression_test() {
+  // Async function expression
+  assert_promise_resolves(
+    "var f = async function() { return 99; }; f()",
+    JsNumber(Finite(99.0)),
+  )
+}
+
+pub fn async_arrow_test() {
+  // Async arrow function
+  assert_promise_resolves("var f = async () => 77; f()", JsNumber(Finite(77.0)))
+}
+
+pub fn async_arrow_await_test() {
+  // Async arrow with await
+  assert_promise_resolves(
+    "var f = async (x) => await Promise.resolve(x * 2);
+     f(21)",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn async_sequential_test() {
+  // Sequential async operations
+  assert_promise_resolves(
+    "async function f() {
+       var x = await 1;
+       var y = await 2;
+       var z = await 3;
+       return x + y + z;
+     }
+     f()",
+    JsNumber(Finite(6.0)),
+  )
+}
+
+pub fn async_nested_call_test() {
+  // Async function calling another async function
+  assert_promise_resolves(
+    "async function double(x) { return x * 2; }
+     async function main() {
+       var a = await double(5);
+       var b = await double(a);
+       return b;
+     }
+     main()",
+    JsNumber(Finite(20.0)),
+  )
+}
+
+pub fn async_try_finally_test() {
+  // try/finally in async function
+  assert_promise_resolves(
+    "async function f() {
+       var x = 0;
+       try {
+         x = await Promise.resolve(1);
+       } finally {
+         x = x + 10;
+       }
+       return x;
+     }
+     f()",
+    JsNumber(Finite(11.0)),
+  )
+}
+
+pub fn async_promise_chain_test() {
+  // Awaiting a .then() chain
+  assert_promise_resolves(
+    "async function f() {
+       return await Promise.resolve(2).then(function(x) { return x * 3; });
+     }
+     f()",
+    JsNumber(Finite(6.0)),
+  )
+}
+
+// ============================================================================
+// Promise ordering / microtask timing tests
+// ============================================================================
+
+pub fn promise_ordering_sync_before_microtask_test() {
+  // Synchronous code runs before .then() callbacks
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       log += '1';
+       Promise.resolve().then(function() { log += '3'; });
+       log += '2';
+       await Promise.resolve();
+       return log;
+     }
+     test()",
+    JsString("123"),
+  )
+}
+
+pub fn promise_ordering_then_chain_test() {
+  // A .then() chain and the test function's awaits interleave across drain rounds.
+  // Each await advances one round; the chain also advances one step per round.
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       Promise.resolve()
+         .then(function() { log += 'a'; })
+         .then(function() { log += 'b'; })
+         .then(function() { log += 'c'; });
+       await Promise.resolve();
+       log += '|';
+       await Promise.resolve();
+       log += '|';
+       await Promise.resolve();
+       return log;
+     }
+     test()",
+    JsString("a|b|c"),
+  )
+}
+
+pub fn promise_ordering_multiple_resolves_test() {
+  // Multiple .then() on the same promise run in registration order
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       var p = Promise.resolve();
+       p.then(function() { log += '1'; });
+       p.then(function() { log += '2'; });
+       p.then(function() { log += '3'; });
+       await Promise.resolve();
+       return log;
+     }
+     test()",
+    JsString("123"),
+  )
+}
+
+pub fn promise_ordering_nested_then_test() {
+  // .then() inside a .then() runs on the next tick
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       Promise.resolve().then(function() {
+         log += '1';
+         Promise.resolve().then(function() { log += '3'; });
+         log += '2';
+       });
+       await Promise.resolve();
+       await Promise.resolve();
+       return log;
+     }
+     test()",
+    JsString("123"),
+  )
+}
+
+pub fn promise_ordering_await_interleave_test() {
+  // Two async functions interleave via await
+  assert_promise_resolves(
+    "var log = '';
+     async function a() {
+       log += 'a1';
+       await Promise.resolve();
+       log += 'a2';
+       await Promise.resolve();
+       log += 'a3';
+     }
+     async function b() {
+       log += 'b1';
+       await Promise.resolve();
+       log += 'b2';
+       await Promise.resolve();
+       log += 'b3';
+     }
+     async function test() {
+       var pa = a();
+       var pb = b();
+       await pa;
+       await pb;
+       return log;
+     }
+     test()",
+    JsString("a1b1a2b2a3b3"),
+  )
+}
+
+pub fn promise_ordering_resolve_vs_then_test() {
+  // Promise.resolve(val).then(fn) — fn runs asynchronously, not synchronously
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       log += 'before';
+       Promise.resolve('x').then(function(v) { log += v; });
+       log += 'after';
+       await Promise.resolve();
+       return log;
+     }
+     test()",
+    JsString("beforeafterx"),
+  )
+}
+
+pub fn promise_ordering_reject_catch_test() {
+  // Rejection .catch() callback runs as microtask
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       log += '1';
+       Promise.reject('e').catch(function() { log += '3'; });
+       log += '2';
+       await Promise.resolve();
+       return log;
+     }
+     test()",
+    JsString("123"),
+  )
+}
+
+pub fn promise_ordering_finally_timing_test() {
+  // .finally() runs as microtask, value passes through
+  assert_promise_resolves(
+    "var log = '';
+     async function test() {
+       log += '1';
+       var p = Promise.resolve('val').finally(function() { log += '2'; });
+       log += '3';
+       var result = await p;
+       log += '4';
+       return log + ':' + result;
+     }
+     test()",
+    JsString("1324:val"),
+  )
+}
+
+// ============================================================================
+// REPL mode tests
+// ============================================================================
+
+/// Evaluate multiple REPL lines in sequence, returning the result of the last line.
+fn run_repl_lines(
+  lines: List(String),
+) -> Result(#(value.JsValue, heap.Heap), String) {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+  let env =
+    vm.ReplEnv(
+      globals:,
+      closure_templates: dict.new(),
+      const_globals: set.new(),
+    )
+  run_repl_lines_loop(lines, h, b, env)
+}
+
+fn run_repl_lines_loop(
+  lines: List(String),
+  h: heap.Heap,
+  b: builtins.Builtins,
+  env: vm.ReplEnv,
+) -> Result(#(value.JsValue, heap.Heap), String) {
+  case lines {
+    [] -> Error("no lines to evaluate")
+    [line] -> {
+      // Last line — return its result
+      case eval_repl_line(line, h, b, env) {
+        Ok(#(val, new_h, _new_env)) -> Ok(#(val, new_h))
+        Error(err) -> Error(err)
+      }
+    }
+    [line, ..rest] -> {
+      case eval_repl_line(line, h, b, env) {
+        Ok(#(_val, new_h, new_env)) ->
+          run_repl_lines_loop(rest, new_h, b, new_env)
+        Error(err) -> Error(err)
+      }
+    }
+  }
+}
+
+fn eval_repl_line(
+  source: String,
+  h: heap.Heap,
+  b: builtins.Builtins,
+  env: vm.ReplEnv,
+) -> Result(#(value.JsValue, heap.Heap, vm.ReplEnv), String) {
+  case parser.parse(source, parser.Script) {
+    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
+    Ok(program) ->
+      case compiler.compile_repl(program) {
+        Error(compiler.Unsupported(desc)) ->
+          Error("compile error: unsupported " <> desc)
+        Error(compiler.BreakOutsideLoop) ->
+          Error("compile error: break outside loop")
+        Error(compiler.ContinueOutsideLoop) ->
+          Error("compile error: continue outside loop")
+        Ok(template) ->
+          case vm.run_and_drain_repl(template, h, b, env) {
+            Ok(#(vm.NormalCompletion(val, new_h), new_env)) ->
+              Ok(#(val, new_h, new_env))
+            Ok(#(vm.ThrowCompletion(val, _), _)) ->
+              Error("throw: " <> string.inspect(val))
+            Ok(#(vm.YieldCompletion(_, _), _)) -> Error("unexpected yield")
+            Error(vm_err) -> Error("vm error: " <> string.inspect(vm_err))
+          }
+      }
+  }
+}
+
+/// Evaluate REPL lines where the last line is expected to throw.
+fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
+  let h = heap.new()
+  let #(h, b) = builtins.init(h)
+  let #(h, globals) = builtins.globals(b, h)
+  let env =
+    vm.ReplEnv(
+      globals:,
+      closure_templates: dict.new(),
+      const_globals: set.new(),
+    )
+  run_repl_throw_loop(lines, h, b, env)
+}
+
+fn run_repl_throw_loop(
+  lines: List(String),
+  h: heap.Heap,
+  b: builtins.Builtins,
+  env: vm.ReplEnv,
+) -> Result(Nil, String) {
+  case lines {
+    [] -> Error("no lines to evaluate")
+    [line] -> {
+      // Last line — expect it to throw
+      case parser.parse(line, parser.Script) {
+        Error(err) ->
+          Error("parse error: " <> parser.parse_error_to_string(err))
+        Ok(program) ->
+          case compiler.compile_repl(program) {
+            Error(_) -> Error("compile error on last line")
+            Ok(template) ->
+              case vm.run_and_drain_repl(template, h, b, env) {
+                Ok(#(vm.ThrowCompletion(_, _), _)) -> Ok(Nil)
+                Ok(#(vm.NormalCompletion(val, _), _)) ->
+                  Error("expected throw, got normal: " <> string.inspect(val))
+                _ -> Error("unexpected result")
+              }
+          }
+      }
+    }
+    [line, ..rest] -> {
+      case eval_repl_line(line, h, b, env) {
+        Ok(#(_val, new_h, new_env)) ->
+          run_repl_throw_loop(rest, new_h, b, new_env)
+        Error(err) -> Error(err)
+      }
+    }
+  }
+}
+
+fn assert_repl(lines: List(String), expected: value.JsValue) {
+  case run_repl_lines(lines) {
+    Ok(#(val, _h)) -> {
+      assert val == expected
+    }
+    Error(err) ->
+      panic as {
+        "REPL error: " <> err <> " for lines: " <> string.inspect(lines)
+      }
+  }
+}
+
+pub fn repl_let_persistence_test() {
+  assert_repl(["let x = 10", "x"], JsNumber(Finite(10.0)))
+}
+
+pub fn repl_const_persistence_test() {
+  assert_repl(["const x = 42", "x"], JsNumber(Finite(42.0)))
+}
+
+pub fn repl_var_persistence_test() {
+  assert_repl(["var x = 5", "x"], JsNumber(Finite(5.0)))
+}
+
+pub fn repl_function_persistence_test() {
+  assert_repl(["function f() { return 1; }", "f()"], JsNumber(Finite(1.0)))
+}
+
+pub fn repl_redeclaration_let_test() {
+  assert_repl(["let x = 1", "let x = 2", "x"], JsNumber(Finite(2.0)))
+}
+
+pub fn repl_redeclaration_const_test() {
+  assert_repl(["const x = 1", "const x = 2", "x"], JsNumber(Finite(2.0)))
+}
+
+pub fn repl_const_assignment_throws_test() {
+  // const x = 1; x = 2 on next line should throw TypeError
+  let assert Ok(Nil) = run_repl_lines_expect_throw(["const x = 1", "x = 2"])
+}
+
+pub fn repl_const_assignment_same_line_throws_test() {
+  // const x = 1; x = 2 on same line should also throw
+  let assert Ok(Nil) = run_repl_lines_expect_throw(["const x = 1; x = 2"])
+}
+
+pub fn repl_let_reassignment_test() {
+  // let allows reassignment across lines
+  assert_repl(["let y = 1", "y = 2", "y"], JsNumber(Finite(2.0)))
+}
+
+pub fn globalthis_typeof_test() {
+  assert_normal("typeof globalThis", JsString("object"))
+}
+
+pub fn globalthis_has_builtins_test() {
+  assert_normal("globalThis.Object === Object", JsBool(True))
 }

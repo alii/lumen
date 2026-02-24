@@ -37,6 +37,55 @@
 
 ---
 
+## NEVER write nested case pyramids — use result/option combinators
+
+**Nested `case` expressions where every failure branch returns the same default value are BANNED.** This is a pyramid of doom and is unacceptable in this codebase. Use `result.try`, `result.map`, `result.unwrap`, `option.map`, `option.unwrap`, and Gleam's `use` keyword to flatten them.
+
+**WRONG — pyramid of doom:**
+```gleam
+let heap = case heap.read(state.heap, ctor_ref) {
+  Ok(ObjectSlot(properties: ctor_props, ..)) ->
+    case dict.get(ctor_props, "prototype") {
+      Ok(DataProperty(value: JsObject(proto_ref), ..)) ->
+        case heap.read(state.heap, proto_ref) {
+          Ok(ObjectSlot(kind:, properties:, elements:, ..)) ->
+            heap.write(state.heap, proto_ref, ObjectSlot(kind:, properties:, elements:, prototype: new_proto))
+          _ -> state.heap
+        }
+      _ -> state.heap
+    }
+  _ -> state.heap
+}
+```
+
+**RIGHT — extract a helper or use result combinators:**
+```gleam
+// Option A: helper functions (preferred when the pattern repeats)
+let heap =
+  get_field_ref(state.heap, ctor_ref, "prototype")
+  |> result.map(set_slot_prototype(state.heap, _, new_proto))
+  |> result.unwrap(state.heap)
+
+// Option B: use with result.try (good for one-off chains)
+let heap = {
+  use ObjectSlot(properties: props, ..) <- result.try(heap.read(state.heap, ctor_ref))
+  use DataProperty(value: JsObject(proto_ref), ..) <- result.try(
+    dict.get(props, "prototype") |> result.nil_error
+  )
+  Ok(set_slot_prototype(state.heap, proto_ref, new_proto))
+}
+|> result.unwrap(state.heap)
+```
+
+**The rule**: If you find yourself writing 2+ levels of nested `case` where every `_`/error branch returns the same fallback, STOP and refactor. Either:
+1. Extract a helper function that encapsulates the read-match-transform chain
+2. Use `result.try`/`result.map`/`result.unwrap` pipeline
+3. Use `use` with `result.try` for sequential dependent operations
+
+This applies equally to `Option` chains — use `option.map`/`option.unwrap`/`option.then` instead of nested `case Some/None`.
+
+---
+
 ## Gleam OTP Patterns - CRITICAL LESSONS
 
 These apply only when targeting Erlang/BEAM. They do not apply to JavaScript target.

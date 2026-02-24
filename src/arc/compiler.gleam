@@ -10,6 +10,7 @@ import arc/compiler/emit
 import arc/compiler/resolve
 import arc/compiler/scope
 import arc/vm/opcode.{type FuncTemplate}
+import arc/vm/value
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None}
@@ -25,16 +26,34 @@ pub type CompileError {
 /// Compile a parsed program into a FuncTemplate the VM can execute.
 pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
-    ast.Script(body) -> compile_script(body)
+    ast.Script(body) -> compile_script(body, emit.emit_program)
+    ast.Module(_) -> Error(Unsupported("modules not supported"))
+  }
+}
+
+/// Compile in REPL mode: top-level var/let/const resolve to globals.
+pub fn compile_repl(program: ast.Program) -> Result(FuncTemplate, CompileError) {
+  case program {
+    ast.Script(body) -> compile_script(body, emit.emit_program_repl)
     ast.Module(_) -> Error(Unsupported("modules not supported"))
   }
 }
 
 fn compile_script(
   stmts: List(ast.Statement),
+  emit_fn: fn(List(ast.Statement)) ->
+    Result(
+      #(
+        List(emit.EmitterOp),
+        List(value.JsValue),
+        Dict(value.JsValue, Int),
+        List(emit.CompiledChild),
+      ),
+      emit.EmitError,
+    ),
 ) -> Result(FuncTemplate, CompileError) {
   // Phase 1: Emit IR from AST
-  case emit.emit_program(stmts) {
+  case emit_fn(stmts) {
     Ok(#(emitter_ops, constants, constants_map, children)) -> {
       // Determine which variables are captured by children (need boxing)
       let captured_vars = collect_all_captured_vars(children, emitter_ops)
@@ -59,6 +78,9 @@ fn compile_script(
           None,
           0,
           [],
+          False,
+          False,
+          False,
           False,
           False,
         )
@@ -129,6 +151,9 @@ fn compile_child(
     env_descriptors,
     child.is_strict,
     child.is_arrow,
+    child.is_derived_constructor,
+    child.is_generator,
+    child.is_async,
   )
 }
 

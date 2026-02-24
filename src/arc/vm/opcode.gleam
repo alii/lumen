@@ -61,6 +61,7 @@ pub type Op {
   PushTry(catch_target: Int)
   PopTry
   EnterFinally
+  EnterFinallyThrow
   LeaveFinally
 
   // -- Closures --
@@ -85,6 +86,29 @@ pub type Op {
   GetIterator
   IteratorNext
   IteratorClose
+
+  // -- Class Inheritance --
+  /// Wire prototype chain for derived class: [parent, ctor] → [ctor]
+  SetupDerivedClass
+  /// Call super constructor: [arg_n, ..., arg_1] → [new_obj]
+  CallSuper(arity: Int)
+
+  // -- Generator --
+  /// Emitted at start of generator body. Suspends immediately (SuspendedStart).
+  InitialYield
+  /// Pop value from stack, suspend generator. On resume, .next(arg) pushed.
+  Yield
+
+  // -- Async --
+  /// Pop value from stack, wrap in Promise.resolve, suspend async function.
+  /// On resume, resolved value is pushed onto stack.
+  Await
+
+  // -- REPL const tracking --
+  /// Mark a global name as const (PutGlobal will throw TypeError for this name).
+  MarkGlobalConst(name: String)
+  /// Remove const protection from a global name (for redeclaration tolerance).
+  UnmarkGlobalConst(name: String)
 }
 
 pub type AccessorKind {
@@ -192,6 +216,7 @@ pub type IrOp {
   IrThrow
   IrPopTry
   IrEnterFinally
+  IrEnterFinallyThrow
   IrLeaveFinally
   IrMakeClosure(func_index: Int)
   IrCloseVar(index: Int)
@@ -206,6 +231,15 @@ pub type IrOp {
   IrGetIterator
   IrIteratorNext
   IrIteratorClose
+  IrSetupDerivedClass
+  IrCallSuper(arity: Int)
+  IrInitialYield
+  IrYield
+  IrAwait
+
+  // -- REPL const tracking --
+  IrMarkGlobalConst(name: String)
+  IrUnmarkGlobalConst(name: String)
 }
 
 // ============================================================================
@@ -225,6 +259,9 @@ pub type FuncTemplate {
     env_descriptors: List(EnvCapture),
     is_strict: Bool,
     is_arrow: Bool,
+    is_derived_constructor: Bool,
+    is_generator: Bool,
+    is_async: Bool,
   )
 }
 

@@ -5,13 +5,15 @@
 /// jump targets use integer label IDs (IrJump). These are resolved in Phase 2 and 3.
 import arc/ast
 import arc/vm/opcode.{
-  type IrOp, IrArrayFrom, IrBinOp, IrCallConstructor, IrCallMethod,
-  IrDefineField, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup, IrForInNext,
-  IrForInStart, IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetIterator,
-  IrGetThis, IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrMakeClosure, IrNewObject, IrPop, IrPopTry,
+  type IrOp, IrArrayFrom, IrAwait, IrBinOp, IrCallConstructor, IrCallMethod,
+  IrCallSuper, IrDefineField, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
+  IrEnterFinally, IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetElem,
+  IrGetElem2, IrGetField, IrGetField2, IrGetIterator, IrGetThis, IrInitialYield,
+  IrIteratorNext, IrJump, IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel,
+  IrLeaveFinally, IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrPop, IrPopTry,
   IrPushConst, IrPushTry, IrPutElem, IrPutField, IrReturn, IrScopeGetVar,
-  IrScopePutVar, IrScopeTypeofVar, IrSwap, IrThrow, IrTypeOf, IrUnaryOp,
+  IrScopePutVar, IrScopeTypeofVar, IrSetupDerivedClass, IrSwap, IrThrow,
+  IrTypeOf, IrUnaryOp, IrUnmarkGlobalConst, IrYield,
 }
 import arc/vm/value.{
   type JsValue, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
@@ -62,12 +64,15 @@ pub type CompiledChild {
     functions: List(CompiledChild),
     is_strict: Bool,
     is_arrow: Bool,
+    is_derived_constructor: Bool,
+    is_generator: Bool,
+    is_async: Bool,
   )
 }
 
 /// Loop context for break/continue targets.
 pub type LoopContext {
-  LoopContext(break_label: Int, continue_label: Int)
+  LoopContext(break_label: Int, continue_label: Int, label: Option(String))
 }
 
 /// The emitter state, threaded through all emit functions.
@@ -81,6 +86,9 @@ pub opaque type Emitter {
     loop_stack: List(LoopContext),
     functions: List(CompiledChild),
     next_func: Int,
+    /// Set by LabeledStatement before emitting a loop body.
+    /// Consumed by push_loop to attach the label to the LoopContext.
+    pending_label: Option(String),
   )
 }
 
@@ -103,22 +111,51 @@ pub fn emit_program(
   #(List(EmitterOp), List(JsValue), Dict(JsValue, Int), List(CompiledChild)),
   EmitError,
 ) {
+  emit_program_common(stmts, True, emit_stmt, emit_stmt_tail)
+}
+
+/// Emit IR for REPL mode: top-level var/let/const skip DeclareVar so they
+/// resolve to globals (which persist across REPL evaluations).
+/// Nested scopes (blocks, functions) use normal emit_stmt.
+pub fn emit_program_repl(
+  stmts: List(ast.Statement),
+) -> Result(
+  #(List(EmitterOp), List(JsValue), Dict(JsValue, Int), List(CompiledChild)),
+  EmitError,
+) {
+  emit_program_common(stmts, False, emit_stmt_repl, emit_stmt_tail_repl)
+}
+
+/// Common program emission: sets up scope, hoists, emits body, tears down.
+/// When hoist_vars is True, collects and emits DeclareVar for var declarations.
+/// When False (REPL mode), skips DeclareVar so vars resolve to globals.
+fn emit_program_common(
+  stmts: List(ast.Statement),
+  hoist_vars: Bool,
+  emit_non_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
+  emit_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
+) -> Result(
+  #(List(EmitterOp), List(JsValue), Dict(JsValue, Int), List(CompiledChild)),
+  EmitError,
+) {
   let e = new_emitter()
 
   // Wrap in function scope
   let e = emit_op(e, EnterScope(FunctionScope))
 
-  // Hoisting pre-pass: collect var declarations and function declarations
-  let hoisted_vars = collect_hoisted_vars(stmts)
+  // Hoisting pre-pass: optionally collect var declarations
+  let e = case hoist_vars {
+    True -> {
+      let hoisted_vars = collect_hoisted_vars(stmts)
+      list.fold(hoisted_vars, e, fn(e, name) {
+        emit_op(e, DeclareVar(name, VarBinding))
+      })
+    }
+    False -> e
+  }
+
+  // Collect and emit hoisted function declarations
   let #(e, hoisted_funcs) = collect_hoisted_funcs(e, stmts)
-
-  // Emit var declarations at top
-  let e =
-    list.fold(hoisted_vars, e, fn(e, name) {
-      emit_op(e, DeclareVar(name, VarBinding))
-    })
-
-  // Emit hoisted function declarations
   let e =
     list.fold(hoisted_funcs, e, fn(e, hf) {
       let #(name, func_idx) = hf
@@ -127,11 +164,113 @@ pub fn emit_program(
       e
     })
 
-  // Emit body — last expression statement's value is the program result
-  use e <- result.try(emit_program_body(stmts, e))
+  // Emit body — last statement in tail position keeps its value on stack
+  use e <- result.try(emit_program_body_with(stmts, e, emit_non_tail, emit_tail))
 
   let e = emit_op(e, LeaveScope)
   Ok(finish(e))
+}
+
+/// Emit program body using provided statement emitters.
+/// The last statement is emitted with emit_tail (keeps value on stack),
+/// all others use emit_non_tail (which pops the value).
+fn emit_program_body_with(
+  stmts: List(ast.Statement),
+  e: Emitter,
+  emit_non_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
+  emit_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
+) -> Result(Emitter, EmitError) {
+  case stmts {
+    [] -> Ok(push_const(e, JsUndefined))
+    [only] -> emit_tail(e, only)
+    [first, ..rest] -> {
+      use e <- result.try(emit_non_tail(e, first))
+      emit_program_body_with(rest, e, emit_non_tail, emit_tail)
+    }
+  }
+}
+
+/// REPL statement emit: only differs from emit_stmt for VariableDeclaration
+/// and FunctionDeclaration (skips DeclareVar so they resolve to globals).
+/// For const declarations, emits MarkGlobalConst/UnmarkGlobalConst for enforcement.
+/// All other statements delegate to normal emit_stmt.
+fn emit_stmt_repl(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
+  case stmt {
+    ast.VariableDeclaration(kind, declarators) -> {
+      // Skip DeclareVar entirely — IrScopePutVar will resolve to PutGlobal
+      list.try_fold(declarators, e, fn(e, decl) {
+        case decl {
+          ast.VariableDeclarator(ast.IdentifierPattern(name), init) -> {
+            // Remove const protection to allow redeclaration
+            let e = emit_ir(e, IrUnmarkGlobalConst(name))
+            case init {
+              Some(init_expr) -> {
+                use e <- result.map(emit_expr(e, init_expr))
+                let e = emit_ir(e, IrScopePutVar(name))
+                // Mark as const if this is a const declaration
+                case kind {
+                  ast.Const -> emit_ir(e, IrMarkGlobalConst(name))
+                  _ -> e
+                }
+              }
+              None -> Ok(e)
+            }
+          }
+          // Destructuring patterns — use VarBinding which skips DeclareVar
+          ast.VariableDeclarator(pattern, init) -> {
+            // For destructuring, unmark all bound names first
+            let names = collect_pattern_names(pattern)
+            let e =
+              list.fold(names, e, fn(e, name) {
+                emit_ir(e, IrUnmarkGlobalConst(name))
+              })
+            use e <- result.try(case init {
+              Some(init_expr) -> emit_expr(e, init_expr)
+              None -> Ok(push_const(e, JsUndefined))
+            })
+            use e <- result.map(emit_destructuring_bind(e, pattern, VarBinding))
+            // Mark all as const if this is a const declaration
+            case kind {
+              ast.Const ->
+                list.fold(names, e, fn(e, name) {
+                  emit_ir(e, IrMarkGlobalConst(name))
+                })
+              _ -> e
+            }
+          }
+        }
+      })
+    }
+
+    // Function declarations are already handled by hoisting — skip
+    ast.FunctionDeclaration(..) -> Ok(e)
+
+    // Everything else delegates to normal emit_stmt
+    _ -> emit_stmt(e, stmt)
+  }
+}
+
+/// REPL tail position: handles the last statement in the REPL input.
+fn emit_stmt_tail_repl(
+  e: Emitter,
+  stmt: ast.Statement,
+) -> Result(Emitter, EmitError) {
+  case stmt {
+    ast.ExpressionStatement(expr) ->
+      // Tail position: keep value on stack (no IrPop)
+      emit_expr(e, expr)
+
+    ast.VariableDeclaration(..) -> {
+      // Emit the declaration via REPL path, then push undefined as completion value
+      use e <- result.map(emit_stmt_repl(e, stmt))
+      push_const(e, JsUndefined)
+    }
+
+    // All other statements: delegate to normal emit_stmt_tail
+    // (which recurses into normal emit_stmt for nested blocks — correct
+    // since those aren't top-level REPL declarations)
+    _ -> emit_stmt_tail(e, stmt)
+  }
 }
 
 // ============================================================================
@@ -148,6 +287,7 @@ fn new_emitter() -> Emitter {
     loop_stack: [],
     functions: [],
     next_func: 0,
+    pending_label: None,
   )
 }
 
@@ -187,16 +327,35 @@ fn fresh_label(e: Emitter) -> #(Emitter, Int) {
 }
 
 fn push_loop(e: Emitter, break_label: Int, continue_label: Int) -> Emitter {
-  Emitter(..e, loop_stack: [
-    LoopContext(break_label:, continue_label:),
-    ..e.loop_stack
-  ])
+  let label = e.pending_label
+  Emitter(
+    ..e,
+    loop_stack: [
+      LoopContext(break_label:, continue_label:, label:),
+      ..e.loop_stack
+    ],
+    pending_label: None,
+  )
 }
 
 fn pop_loop(e: Emitter) -> Emitter {
   case e.loop_stack {
     [_, ..rest] -> Emitter(..e, loop_stack: rest)
     [] -> e
+  }
+}
+
+fn find_label(
+  stack: List(LoopContext),
+  target: String,
+) -> Result(LoopContext, Nil) {
+  case stack {
+    [] -> Error(Nil)
+    [ctx, ..rest] ->
+      case ctx.label {
+        Some(l) if l == target -> Ok(ctx)
+        _ -> find_label(rest, target)
+      }
   }
 }
 
@@ -222,22 +381,6 @@ fn finish(
     e.constants_map,
     e.functions,
   )
-}
-
-/// Emit program body: all statements, but the last statement is emitted in
-/// "tail" position — its completion value stays on the stack as the program result.
-fn emit_program_body(
-  stmts: List(ast.Statement),
-  e: Emitter,
-) -> Result(Emitter, EmitError) {
-  case stmts {
-    [] -> Ok(push_const(e, JsUndefined))
-    [only] -> emit_stmt_tail(e, only)
-    [first, ..rest] -> {
-      use e <- result.try(emit_stmt(e, first))
-      emit_program_body(rest, e)
-    }
-  }
 }
 
 /// Emit a statement in "tail" position — its completion value stays on stack.
@@ -458,8 +601,17 @@ fn collect_hoisted_funcs(
   list.fold(stmts, #(e, []), fn(acc, stmt) {
     let #(e, funcs) = acc
     case stmt {
-      ast.FunctionDeclaration(Some(name), params, body, _is_gen, _is_async) -> {
-        let child = compile_function_body(e, Some(name), params, body, False)
+      ast.FunctionDeclaration(Some(name), params, body, is_gen, is_async) -> {
+        let child =
+          compile_function_body(
+            e,
+            Some(name),
+            params,
+            body,
+            False,
+            is_gen,
+            is_async,
+          )
         let #(e, idx) = add_child_function(e, child)
         #(e, list.append(funcs, [#(name, idx)]))
       }
@@ -475,6 +627,8 @@ fn compile_function_body(
   params: List(ast.Pattern),
   body: ast.Statement,
   is_arrow: Bool,
+  is_generator: Bool,
+  is_async: Bool,
 ) -> CompiledChild {
   // Use a fresh emitter inheriting nothing from parent (except label counter for uniqueness)
   let e = Emitter(..new_emitter(), next_label: parent.next_label)
@@ -531,6 +685,16 @@ fn compile_function_body(
       e
     })
 
+  // For generators, emit IrInitialYield after parameter setup and hoisting,
+  // but before the function body. This suspends execution so the generator
+  // returns the iterator object (caller must call .next() to start).
+  // Async functions do NOT get InitialYield — they run eagerly until the first
+  // await or completion.
+  let e = case is_generator {
+    True -> emit_ir(e, IrInitialYield)
+    False -> e
+  }
+
   // Emit body statements
   let e = case emit_stmts(e, stmts) {
     Ok(e) -> e
@@ -554,6 +718,9 @@ fn compile_function_body(
     functions: children,
     is_strict: False,
     is_arrow:,
+    is_derived_constructor: False,
+    is_generator:,
+    is_async:,
   )
 }
 
@@ -570,7 +737,7 @@ fn emit_stmts(
 
 fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
   case stmt {
-    ast.EmptyStatement -> Ok(e)
+    ast.EmptyStatement | ast.DebuggerStatement -> Ok(e)
 
     ast.ExpressionStatement(expr) -> {
       use e <- result.map(emit_expr(e, expr))
@@ -753,10 +920,10 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       emit_ir(e, IrThrow)
     }
 
-    ast.TryStatement(block, handler, _finalizer) -> {
-      // MVP: try-catch only (no finally)
-      case handler {
-        Some(ast.CatchClause(param, catch_body)) -> {
+    ast.TryStatement(block, handler, finalizer) -> {
+      case handler, finalizer {
+        // try/catch (no finally)
+        Some(ast.CatchClause(param, catch_body)), None -> {
           let #(e, catch_label) = fresh_label(e)
           let #(e, end_label) = fresh_label(e)
 
@@ -767,8 +934,6 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
 
           let e = emit_ir(e, IrLabel(catch_label))
           let e = emit_op(e, EnterScope(BlockScope))
-
-          // Bind catch parameter (thrown value is on stack from unwind)
           let e = case param {
             Some(pattern) -> {
               case emit_destructuring_bind(e, pattern, CatchBinding) {
@@ -784,9 +949,79 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           let e = emit_ir(e, IrLabel(end_label))
           Ok(e)
         }
-        None ->
-          // try-finally without catch: just emit the block for MVP
-          emit_stmt(e, block)
+
+        // try/finally (no catch)
+        None, Some(finally_body) -> {
+          let #(e, finally_throw_label) = fresh_label(e)
+          let #(e, finally_body_label) = fresh_label(e)
+
+          let e = emit_ir(e, IrPushTry(finally_throw_label, -1))
+          use e <- result.try(emit_stmt(e, block))
+          let e = emit_ir(e, IrPopTry)
+          let e = emit_ir(e, IrEnterFinally)
+          let e = emit_ir(e, IrJump(finally_body_label))
+
+          // Exception path: thrown value on stack from unwind_to_catch
+          let e = emit_ir(e, IrLabel(finally_throw_label))
+          let e = emit_ir(e, IrEnterFinallyThrow)
+
+          // Finally body
+          let e = emit_ir(e, IrLabel(finally_body_label))
+          use e <- result.try(emit_stmt(e, finally_body))
+          let e = emit_ir(e, IrLeaveFinally)
+          Ok(e)
+        }
+
+        // try/catch/finally
+        Some(ast.CatchClause(param, catch_body)), Some(finally_body) -> {
+          let #(e, finally_throw_label) = fresh_label(e)
+          let #(e, catch_label) = fresh_label(e)
+          let #(e, finally_body_label) = fresh_label(e)
+
+          // Outer try: catches exceptions from catch body → finally with ThrowCompletion
+          let e = emit_ir(e, IrPushTry(finally_throw_label, -1))
+          // Inner try: catches exceptions from try body → catch handler
+          let e = emit_ir(e, IrPushTry(catch_label, -1))
+          use e <- result.try(emit_stmt(e, block))
+          let e = emit_ir(e, IrPopTry)
+          // Pop inner try
+          let e = emit_ir(e, IrPopTry)
+          // Pop outer try
+          let e = emit_ir(e, IrEnterFinally)
+          let e = emit_ir(e, IrJump(finally_body_label))
+
+          // Catch handler
+          let e = emit_ir(e, IrLabel(catch_label))
+          let e = emit_op(e, EnterScope(BlockScope))
+          let e = case param {
+            Some(pattern) -> {
+              case emit_destructuring_bind(e, pattern, CatchBinding) {
+                Ok(e) -> e
+                Error(_) -> e
+              }
+            }
+            None -> emit_ir(e, IrPop)
+          }
+          use e <- result.try(emit_stmt(e, catch_body))
+          let e = emit_op(e, LeaveScope)
+          let e = emit_ir(e, IrPopTry)
+          // Pop outer try
+          let e = emit_ir(e, IrEnterFinally)
+          let e = emit_ir(e, IrJump(finally_body_label))
+
+          // Exception path (from catch body re-throwing)
+          let e = emit_ir(e, IrLabel(finally_throw_label))
+          let e = emit_ir(e, IrEnterFinallyThrow)
+
+          // Finally body (shared by all paths)
+          let e = emit_ir(e, IrLabel(finally_body_label))
+          use e <- result.try(emit_stmt(e, finally_body))
+          let e = emit_ir(e, IrLeaveFinally)
+          Ok(e)
+        }
+
+        // try with neither catch nor finally (shouldn't happen per spec, but handle gracefully)
+        None, None -> emit_stmt(e, block)
       }
     }
 
@@ -804,6 +1039,13 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       }
     }
 
+    ast.BreakStatement(Some(label)) -> {
+      case find_label(e.loop_stack, label) {
+        Ok(ctx) -> Ok(emit_ir(e, IrJump(ctx.break_label)))
+        Error(_) -> Error(BreakOutsideLoop)
+      }
+    }
+
     ast.ContinueStatement(None) -> {
       case e.loop_stack {
         [ctx, ..] -> {
@@ -811,6 +1053,43 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           Ok(e)
         }
         [] -> Error(ContinueOutsideLoop)
+      }
+    }
+
+    ast.ContinueStatement(Some(label)) -> {
+      case find_label(e.loop_stack, label) {
+        Ok(ctx) -> Ok(emit_ir(e, IrJump(ctx.continue_label)))
+        Error(_) -> Error(ContinueOutsideLoop)
+      }
+    }
+
+    ast.LabeledStatement(label, body) -> {
+      case body {
+        // Labeled loop: set pending_label so the loop picks it up
+        ast.WhileStatement(..)
+        | ast.DoWhileStatement(..)
+        | ast.ForStatement(..)
+        | ast.ForInStatement(..)
+        | ast.ForOfStatement(..) -> {
+          let e = Emitter(..e, pending_label: Some(label))
+          emit_stmt(e, body)
+        }
+        // Labeled non-loop: create a break-only target
+        _ -> {
+          let #(e, break_target) = fresh_label(e)
+          let e =
+            Emitter(..e, loop_stack: [
+              LoopContext(
+                break_label: break_target,
+                continue_label: -1,
+                label: Some(label),
+              ),
+              ..e.loop_stack
+            ])
+          use e <- result.map(emit_stmt(e, body))
+          let e = pop_loop(e)
+          emit_ir(e, IrLabel(break_target))
+        }
       }
     }
 
@@ -1063,6 +1342,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       }
     }
 
+    // super(args) — call parent constructor
+    ast.CallExpression(ast.SuperExpression, args) -> {
+      use e <- result.map(list.try_fold(args, e, emit_expr))
+      emit_ir(e, IrCallSuper(list.length(args)))
+    }
+
     // Method call: obj.method(args) — emits GetField2 + CallMethod for this binding
     ast.CallExpression(
       ast.MemberExpression(obj, ast.Identifier(method_name), False),
@@ -1136,6 +1421,57 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
       emit_ir(e, IrGetElem)
     }
 
+    // Optional member expression (obj?.prop)
+    ast.OptionalMemberExpression(object, ast.Identifier(prop), False) -> {
+      let #(e, nullish_label) = fresh_label(e)
+      let #(e, end_label) = fresh_label(e)
+      use e <- result.try(emit_expr(e, object))
+      let e = emit_ir(e, IrDup)
+      let e = emit_ir(e, IrJumpIfNullish(nullish_label))
+      let e = emit_ir(e, IrGetField(prop))
+      let e = emit_ir(e, IrJump(end_label))
+      let e = emit_ir(e, IrLabel(nullish_label))
+      let e = emit_ir(e, IrPop)
+      let e = push_const(e, JsUndefined)
+      let e = emit_ir(e, IrLabel(end_label))
+      Ok(e)
+    }
+
+    // Optional computed member expression (obj?.[key])
+    ast.OptionalMemberExpression(object, property, True) -> {
+      let #(e, nullish_label) = fresh_label(e)
+      let #(e, end_label) = fresh_label(e)
+      use e <- result.try(emit_expr(e, object))
+      let e = emit_ir(e, IrDup)
+      let e = emit_ir(e, IrJumpIfNullish(nullish_label))
+      use e <- result.try(emit_expr(e, property))
+      let e = emit_ir(e, IrGetElem)
+      let e = emit_ir(e, IrJump(end_label))
+      let e = emit_ir(e, IrLabel(nullish_label))
+      let e = emit_ir(e, IrPop)
+      let e = push_const(e, JsUndefined)
+      let e = emit_ir(e, IrLabel(end_label))
+      Ok(e)
+    }
+
+    // Optional call expression (fn?.())
+    ast.OptionalCallExpression(callee, args) -> {
+      let #(e, nullish_label) = fresh_label(e)
+      let #(e, end_label) = fresh_label(e)
+      use e <- result.try(emit_expr(e, callee))
+      let e = emit_ir(e, IrDup)
+      let e = emit_ir(e, IrJumpIfNullish(nullish_label))
+      let arity = list.length(args)
+      use e <- result.try(list.try_fold(args, e, emit_expr))
+      let e = emit_ir(e, opcode.IrCall(arity))
+      let e = emit_ir(e, IrJump(end_label))
+      let e = emit_ir(e, IrLabel(nullish_label))
+      let e = emit_ir(e, IrPop)
+      let e = push_const(e, JsUndefined)
+      let e = emit_ir(e, IrLabel(end_label))
+      Ok(e)
+    }
+
     // Array literal
     ast.ArrayExpression(elements) -> {
       let count = list.length(elements)
@@ -1152,20 +1488,22 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     // Function expression
-    ast.FunctionExpression(name, params, body, _is_gen, _is_async) -> {
-      let child = compile_function_body(e, name, params, body, False)
+    ast.FunctionExpression(name, params, body, is_gen, is_async) -> {
+      let child =
+        compile_function_body(e, name, params, body, False, is_gen, is_async)
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
 
     // Arrow function expression
-    ast.ArrowFunctionExpression(params, body, _is_async) -> {
+    ast.ArrowFunctionExpression(params, body, is_async) -> {
       let body_stmt = case body {
         ast.ArrowBodyExpression(expr) ->
           ast.BlockStatement([ast.ReturnStatement(Some(expr))])
         ast.ArrowBodyBlock(stmt) -> stmt
       }
-      let child = compile_function_body(e, None, params, body_stmt, True)
+      let child =
+        compile_function_body(e, None, params, body_stmt, True, False, is_async)
       let #(e, idx) = add_child_function(e, child)
       Ok(emit_ir(e, IrMakeClosure(idx)))
     }
@@ -1188,6 +1526,29 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     // Class expression
     ast.ClassExpression(name, super_class, body) ->
       compile_class(e, name, super_class, body)
+
+    // Yield expression (inside generator functions)
+    ast.YieldExpression(argument, is_delegate) -> {
+      case is_delegate {
+        True -> Error(Unsupported("yield* (delegate yield)"))
+        False -> {
+          let e = case argument {
+            Some(arg) -> {
+              use e <- result.try(emit_expr(e, arg))
+              Ok(e)
+            }
+            None -> Ok(push_const(e, JsUndefined))
+          }
+          use e <- result.map(e)
+          emit_ir(e, IrYield)
+        }
+      }
+    }
+
+    ast.AwaitExpression(argument) -> {
+      use e <- result.map(emit_expr(e, argument))
+      emit_ir(e, IrAwait)
+    }
 
     _ -> Error(Unsupported("expression: " <> string_inspect_expr_kind(expr)))
   }
@@ -1737,10 +2098,216 @@ fn compile_class(
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
 ) -> Result(Emitter, EmitError) {
-  // Phase 1: extends not yet supported
   case super_class {
-    Some(_) -> Error(Unsupported("class extends"))
+    Some(parent_expr) -> compile_derived_class(e, name, parent_expr, body)
     None -> compile_base_class(e, name, body)
+  }
+}
+
+fn compile_derived_class(
+  e: Emitter,
+  name: Option(String),
+  parent_expr: ast.Expression,
+  body: List(ast.ClassElement),
+) -> Result(Emitter, EmitError) {
+  let #(ctor_method, instance_methods, static_methods, instance_fields) =
+    classify_class_body(body)
+
+  // Build constructor: if none provided, synthesize default derived constructor
+  // Default: constructor(...args) { super(...args); }
+  // Simplified: constructor() { super(); }
+  let #(ctor_params, ctor_body) = case ctor_method {
+    Some(ast.ClassMethod(value: ast.FunctionExpression(_, params, body, ..), ..)) -> #(
+      params,
+      body,
+    )
+    _ -> #(
+      [],
+      ast.BlockStatement([
+        ast.ExpressionStatement(ast.CallExpression(ast.SuperExpression, [])),
+      ]),
+    )
+  }
+
+  // Compile constructor with field initializer preamble
+  // For derived classes, field inits go AFTER super() call
+  // (but for simplicity, if user wrote explicit ctor we trust them;
+  //  for default ctor, fields need to go after super())
+  let ctor_body_with_fields = case ctor_method {
+    Some(_) -> inject_field_inits(instance_fields, ctor_body)
+    None ->
+      // For default derived constructor: super() first, then fields
+      inject_field_inits_after(instance_fields, ctor_body)
+  }
+
+  // Constructors cannot be generators or async (spec forbids it)
+  let child =
+    compile_function_body(
+      e,
+      name,
+      ctor_params,
+      ctor_body_with_fields,
+      False,
+      False,
+      False,
+    )
+  // Mark as derived constructor
+  let child = CompiledChild(..child, is_derived_constructor: True)
+  let #(e, ctor_idx) = add_child_function(e, child)
+
+  // Step 1: Emit parent expression → [parent]
+  use e <- result.try(emit_expr(e, parent_expr))
+
+  // Step 2: MakeClosure for the derived constructor → [parent, ctor]
+  let e = emit_ir(e, IrMakeClosure(ctor_idx))
+
+  // Step 3: SetupDerivedClass → [ctor] (wires prototype chain)
+  let e = emit_ir(e, IrSetupDerivedClass)
+
+  // Step 4: Define instance methods on ctor.prototype (same as base class)
+  use e <- result.try(
+    list.try_fold(instance_methods, e, fn(e, method) {
+      case method {
+        ast.ClassMethod(
+          key: ast.Identifier(method_name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let method_child =
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          Ok(emit_ir(e, IrPop))
+        }
+        ast.ClassMethod(
+          key: ast.StringExpression(method_name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          let e = emit_ir(e, IrGetField("prototype"))
+          let method_child =
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed/getter/setter class method"))
+      }
+    }),
+  )
+
+  // Step 5: Define static methods on ctor
+  use e <- result.try(
+    list.try_fold(static_methods, e, fn(e, method) {
+      case method {
+        ast.ClassMethod(
+          key: ast.Identifier(method_name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          let method_child =
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          Ok(emit_ir(e, IrPop))
+        }
+        ast.ClassMethod(
+          key: ast.StringExpression(method_name),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
+          computed: False,
+          ..,
+        ) -> {
+          let e = emit_ir(e, IrDup)
+          let method_child =
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
+          let #(e, method_idx) = add_child_function(e, method_child)
+          let e = emit_ir(e, IrMakeClosure(method_idx))
+          let e = emit_ir(e, IrDefineMethod(method_name))
+          Ok(emit_ir(e, IrPop))
+        }
+        _ -> Error(Unsupported("computed/getter/setter static method"))
+      }
+    }),
+  )
+
+  // Stack: [ctor]
+  Ok(e)
+}
+
+/// Inject field initializers after existing statements (for default derived constructor).
+fn inject_field_inits_after(
+  fields: List(ast.ClassElement),
+  body: ast.Statement,
+) -> ast.Statement {
+  case fields {
+    [] -> body
+    _ -> {
+      let field_stmts =
+        list.filter_map(fields, fn(field) {
+          case field {
+            ast.ClassField(key: ast.Identifier(name), value: Some(init), ..) ->
+              Ok(
+                ast.ExpressionStatement(ast.AssignmentExpression(
+                  operator: ast.Assign,
+                  left: ast.MemberExpression(
+                    ast.ThisExpression,
+                    ast.Identifier(name),
+                    False,
+                  ),
+                  right: init,
+                )),
+              )
+            _ -> Error(Nil)
+          }
+        })
+      let existing_stmts = case body {
+        ast.BlockStatement(stmts) -> stmts
+        other -> [other]
+      }
+      ast.BlockStatement(list.append(existing_stmts, field_stmts))
+    }
   }
 }
 
@@ -1763,9 +2330,18 @@ fn compile_base_class(
   }
 
   // Compile constructor: wrap the body with field initializer preamble
+  // Constructors cannot be generators or async (spec forbids it)
   let ctor_body_with_fields = inject_field_inits(instance_fields, ctor_body)
   let child =
-    compile_function_body(e, name, ctor_params, ctor_body_with_fields, False)
+    compile_function_body(
+      e,
+      name,
+      ctor_params,
+      ctor_body_with_fields,
+      False,
+      False,
+      False,
+    )
   let #(e, ctor_idx) = add_child_function(e, child)
 
   // Step 1: MakeClosure for the constructor (creates .prototype + .prototype.constructor)
@@ -1778,7 +2354,7 @@ fn compile_base_class(
       case method {
         ast.ClassMethod(
           key: ast.Identifier(method_name),
-          value: ast.FunctionExpression(_, params, body, ..),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
           computed: False,
           ..,
         ) -> {
@@ -1787,7 +2363,15 @@ fn compile_base_class(
           let e = emit_ir(e, IrGetField("prototype"))
           // Stack: [ctor, proto]
           let method_child =
-            compile_function_body(e, Some(method_name), params, body, False)
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
           let #(e, method_idx) = add_child_function(e, method_child)
           let e = emit_ir(e, IrMakeClosure(method_idx))
           // Stack: [ctor, proto, method_fn]
@@ -1798,14 +2382,22 @@ fn compile_base_class(
         }
         ast.ClassMethod(
           key: ast.StringExpression(method_name),
-          value: ast.FunctionExpression(_, params, body, ..),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
           computed: False,
           ..,
         ) -> {
           let e = emit_ir(e, IrDup)
           let e = emit_ir(e, IrGetField("prototype"))
           let method_child =
-            compile_function_body(e, Some(method_name), params, body, False)
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
           let #(e, method_idx) = add_child_function(e, method_child)
           let e = emit_ir(e, IrMakeClosure(method_idx))
           let e = emit_ir(e, IrDefineMethod(method_name))
@@ -1822,14 +2414,22 @@ fn compile_base_class(
       case method {
         ast.ClassMethod(
           key: ast.Identifier(method_name),
-          value: ast.FunctionExpression(_, params, body, ..),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
           computed: False,
           ..,
         ) -> {
           let e = emit_ir(e, IrDup)
           // Stack: [ctor, ctor]
           let method_child =
-            compile_function_body(e, Some(method_name), params, body, False)
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
           let #(e, method_idx) = add_child_function(e, method_child)
           let e = emit_ir(e, IrMakeClosure(method_idx))
           // Stack: [ctor, ctor, method_fn]
@@ -1840,13 +2440,21 @@ fn compile_base_class(
         }
         ast.ClassMethod(
           key: ast.StringExpression(method_name),
-          value: ast.FunctionExpression(_, params, body, ..),
+          value: ast.FunctionExpression(_, params, body, is_gen, is_async),
           computed: False,
           ..,
         ) -> {
           let e = emit_ir(e, IrDup)
           let method_child =
-            compile_function_body(e, Some(method_name), params, body, False)
+            compile_function_body(
+              e,
+              Some(method_name),
+              params,
+              body,
+              False,
+              is_gen,
+              is_async,
+            )
           let #(e, method_idx) = add_child_function(e, method_child)
           let e = emit_ir(e, IrMakeClosure(method_idx))
           let e = emit_ir(e, IrDefineMethod(method_name))

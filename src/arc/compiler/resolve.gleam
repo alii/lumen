@@ -5,17 +5,19 @@
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
 import arc/vm/opcode.{
-  type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrBinOp,
-  IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod, IrCloseVar,
-  IrDefineAccessor, IrDefineField, IrDefineFieldComputed, IrDefineMethod,
-  IrDeleteElem, IrDeleteField, IrDup, IrEnterFinally, IrForInNext, IrForInStart,
-  IrGetBoxed, IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal,
-  IrGetIterator, IrGetLocal, IrGetThis, IrIteratorClose, IrIteratorNext, IrJump,
+  type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrAwait,
+  IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod,
+  IrCallSuper, IrCloseVar, IrDefineAccessor, IrDefineField,
+  IrDefineFieldComputed, IrDefineMethod, IrDeleteElem, IrDeleteField, IrDup,
+  IrEnterFinally, IrEnterFinallyThrow, IrForInNext, IrForInStart, IrGetBoxed,
+  IrGetElem, IrGetElem2, IrGetField, IrGetField2, IrGetGlobal, IrGetIterator,
+  IrGetLocal, IrGetThis, IrInitialYield, IrIteratorClose, IrIteratorNext, IrJump,
   IrJumpIfFalse, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLeaveFinally,
-  IrMakeClosure, IrNewObject, IrObjectSpread, IrPop, IrPopTry, IrPushConst,
-  IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal, IrPutLocal,
-  IrReturn, IrRot3, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar, IrSwap,
-  IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
+  IrMakeClosure, IrMarkGlobalConst, IrNewObject, IrObjectSpread, IrPop, IrPopTry,
+  IrPushConst, IrPushTry, IrPutBoxed, IrPutElem, IrPutField, IrPutGlobal,
+  IrPutLocal, IrReturn, IrRot3, IrScopeGetVar, IrScopePutVar, IrScopeTypeofVar,
+  IrSetupDerivedClass, IrSwap, IrThrow, IrTypeOf, IrTypeofGlobal, IrUnaryOp,
+  IrUnmarkGlobalConst, IrYield,
 }
 import arc/vm/value.{type JsValue}
 import gleam/dict.{type Dict}
@@ -36,6 +38,9 @@ pub fn resolve(
   env_descriptors: List(opcode.EnvCapture),
   is_strict: Bool,
   is_arrow: Bool,
+  is_derived_constructor: Bool,
+  is_generator: Bool,
+  is_async: Bool,
 ) -> FuncTemplate {
   let label_map = build_label_map(code, 0, dict.new())
   let ops = resolve_ops(code, label_map, [])
@@ -49,6 +54,9 @@ pub fn resolve(
     env_descriptors:,
     is_strict:,
     is_arrow:,
+    is_derived_constructor:,
+    is_generator:,
+    is_async:,
   )
 }
 
@@ -175,6 +183,8 @@ fn resolve_ops(
     [IrPopTry, ..rest] -> resolve_ops(rest, labels, [opcode.PopTry, ..acc])
     [IrEnterFinally, ..rest] ->
       resolve_ops(rest, labels, [opcode.EnterFinally, ..acc])
+    [IrEnterFinallyThrow, ..rest] ->
+      resolve_ops(rest, labels, [opcode.EnterFinallyThrow, ..acc])
     [IrLeaveFinally, ..rest] ->
       resolve_ops(rest, labels, [opcode.LeaveFinally, ..acc])
 
@@ -208,5 +218,25 @@ fn resolve_ops(
       resolve_ops(rest, labels, [opcode.IteratorNext, ..acc])
     [IrIteratorClose, ..rest] ->
       resolve_ops(rest, labels, [opcode.IteratorClose, ..acc])
+
+    // Class inheritance
+    [IrSetupDerivedClass, ..rest] ->
+      resolve_ops(rest, labels, [opcode.SetupDerivedClass, ..acc])
+    [IrCallSuper(arity), ..rest] ->
+      resolve_ops(rest, labels, [opcode.CallSuper(arity), ..acc])
+
+    // Generator
+    [IrInitialYield, ..rest] ->
+      resolve_ops(rest, labels, [opcode.InitialYield, ..acc])
+    [IrYield, ..rest] -> resolve_ops(rest, labels, [opcode.Yield, ..acc])
+
+    // Async
+    [IrAwait, ..rest] -> resolve_ops(rest, labels, [opcode.Await, ..acc])
+
+    // REPL const tracking
+    [IrMarkGlobalConst(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.MarkGlobalConst(name), ..acc])
+    [IrUnmarkGlobalConst(name), ..rest] ->
+      resolve_ops(rest, labels, [opcode.UnmarkGlobalConst(name), ..acc])
   }
 }

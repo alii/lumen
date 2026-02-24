@@ -3,14 +3,19 @@ import arc/vm/builtins/boolean as builtins_boolean
 import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
+import arc/vm/builtins/generator as builtins_generator
 import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
+import arc/vm/builtins/promise as builtins_promise
 import arc/vm/builtins/string as builtins_string
 import arc/vm/heap.{type Heap}
-import arc/vm/value
+import arc/vm/value.{
+  DataProperty, JsObject, JsUndefined, ObjectSlot, OrdinaryObject,
+}
 import gleam/dict
-import gleam/option.{None}
+import gleam/list
+import gleam/option.{None, Some}
 
 /// Pre-allocated prototype objects and constructor functions for JS built-ins.
 /// All refs are rooted so GC never collects them.
@@ -32,6 +37,8 @@ pub type Builtins {
     parse_float: value.Ref,
     is_nan: value.Ref,
     is_finite: value.Ref,
+    promise: BuiltinType,
+    generator: builtins_generator.GeneratorBuiltin,
   )
 }
 
@@ -72,6 +79,13 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Boolean constructor + prototype
   let #(h, boolean) = builtins_boolean.init(h, object_proto, function.prototype)
 
+  // Promise constructor + prototype
+  let #(h, promise) = builtins_promise.init(h, object_proto, function.prototype)
+
+  // Generator.prototype (no constructor — generators are created by function*)
+  let #(h, generator) =
+    builtins_generator.init(h, object_proto, function.prototype)
+
   #(
     h,
     Builtins(
@@ -91,6 +105,70 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       parse_float:,
       is_nan:,
       is_finite:,
+      promise:,
+      generator:,
     ),
   )
+}
+
+/// Build the default global variable bindings from initialized builtins.
+/// Creates a globalThis object on the heap and returns updated heap + globals dict.
+pub fn globals(
+  b: Builtins,
+  h: Heap,
+) -> #(Heap, dict.Dict(String, value.JsValue)) {
+  let entries = [
+    #("NaN", value.JsNumber(value.NaN)),
+    #("Infinity", value.JsNumber(value.Infinity)),
+    #("undefined", JsUndefined),
+    #("Object", JsObject(b.object.constructor)),
+    #("Function", JsObject(b.function.constructor)),
+    #("Array", JsObject(b.array.constructor)),
+    #("Error", JsObject(b.error.constructor)),
+    #("TypeError", JsObject(b.type_error.constructor)),
+    #("ReferenceError", JsObject(b.reference_error.constructor)),
+    #("RangeError", JsObject(b.range_error.constructor)),
+    #("SyntaxError", JsObject(b.syntax_error.constructor)),
+    #("Math", JsObject(b.math)),
+    #("String", JsObject(b.string.constructor)),
+    #("Number", JsObject(b.number.constructor)),
+    #("Boolean", JsObject(b.boolean.constructor)),
+    #("parseInt", JsObject(b.parse_int)),
+    #("parseFloat", JsObject(b.parse_float)),
+    #("isNaN", JsObject(b.is_nan)),
+    #("isFinite", JsObject(b.is_finite)),
+    #("Promise", JsObject(b.promise.constructor)),
+  ]
+
+  // Create globalThis object with all global properties
+  let properties =
+    list.map(entries, fn(pair) {
+      let #(name, val) = pair
+      #(
+        name,
+        DataProperty(
+          value: val,
+          writable: True,
+          enumerable: False,
+          configurable: True,
+        ),
+      )
+    })
+    |> dict.from_list()
+  let #(h, global_ref) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties:,
+        elements: dict.new(),
+        prototype: Some(b.object.prototype),
+      ),
+    )
+  let h = heap.root(h, global_ref)
+
+  let globals =
+    [#("globalThis", JsObject(global_ref)), ..entries]
+    |> dict.from_list()
+  #(h, globals)
 }

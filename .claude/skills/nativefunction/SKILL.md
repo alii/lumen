@@ -144,7 +144,7 @@ If the function needs a global that isn't wired yet, add it to the `globals` dic
 
 ### 6. `test/test262_exec.gleam` — Wire globals (if new global object)
 
-If you added a new global in `builtins.gleam`, also add it to `make_test262_globals()`:
+If you added a new global in `builtins.gleam`, also add it to `builtins.globals()`:
 
 ```gleam
 #("Math", value.JsObject(b.math)),

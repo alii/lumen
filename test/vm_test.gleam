@@ -29,6 +29,9 @@ fn make_func(
     env_descriptors: [],
     is_strict: False,
     is_arrow: False,
+    is_derived_constructor: False,
+    is_generator: False,
+    is_async: False,
   )
 }
 
@@ -43,6 +46,7 @@ fn run_simple(
   case vm.run(func, h, b) {
     Ok(vm.NormalCompletion(val, _heap)) -> Ok(val)
     Ok(vm.ThrowCompletion(_, _)) -> panic as "unexpected ThrowCompletion"
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
     Error(e) -> Error(e)
   }
 }
@@ -59,6 +63,7 @@ fn run_throwing(
     Ok(vm.ThrowCompletion(val, _heap)) -> Ok(val)
     Ok(vm.NormalCompletion(_, _)) ->
       panic as "expected ThrowCompletion, got NormalCompletion"
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
     Error(e) -> Error(e)
   }
 }

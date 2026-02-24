@@ -2,8 +2,8 @@ import arc/vm/builtins.{type Builtins}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
   type JsValue, type Property, type Ref, ArrayObject, DataProperty, Finite,
-  FunctionObject, JsNumber, JsObject, JsString, NativeFunction, ObjectSlot,
-  OrdinaryObject,
+  FunctionObject, GeneratorObject, JsNumber, JsObject, JsString, NativeFunction,
+  ObjectSlot, OrdinaryObject, PromiseObject,
 }
 import gleam/dict
 import gleam/int
@@ -37,8 +37,12 @@ pub fn get_property(heap: Heap, ref: Ref, key: String) -> Result(JsValue, Nil) {
                   }
               }
           }
-        OrdinaryObject | FunctionObject(..) | NativeFunction(_) ->
-          // Ordinary object / function / native: check properties, then prototype chain
+        OrdinaryObject
+        | FunctionObject(..)
+        | NativeFunction(_)
+        | PromiseObject(_)
+        | GeneratorObject(_) ->
+          // Ordinary object / function / native / promise: check properties, then prototype chain
           case dict.get(properties, key) {
             Ok(DataProperty(value: val, ..)) -> Ok(val)
             Error(_) -> walk_prototype(heap, prototype, key)
@@ -100,7 +104,11 @@ pub fn set_property(heap: Heap, ref: Ref, key: String, val: JsValue) -> Heap {
                 prototype,
               )
           }
-        OrdinaryObject | FunctionObject(..) | NativeFunction(_) ->
+        OrdinaryObject
+        | FunctionObject(..)
+        | NativeFunction(_)
+        | PromiseObject(_)
+        | GeneratorObject(_) ->
           set_string_property(
             heap,
             ref,
