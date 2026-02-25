@@ -1,14 +1,13 @@
-import arc/vm/builtins/common.{
-  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
-}
+import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
+import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined, NativeArrayConstructor, NativeArrayIsArray,
-  NativeArrayPrototypeJoin, NativeArrayPrototypePush, NativeFunction, ObjectSlot,
+  type JsElements, type JsValue, type Ref, ArrayObject, JsBool, JsNull, JsNumber,
+  JsObject, JsString, JsUndefined, NativeArrayConstructor, NativeArrayIsArray,
+  NativeArrayPrototypeJoin, NativeArrayPrototypePush, ObjectSlot,
 }
 import gleam/dict
-import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{Some}
@@ -20,88 +19,45 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType) {
-  // Array.prototype — inherits from Object.prototype
-  let #(h, array_proto) = alloc_proto(h, Some(object_proto), dict.new())
-
-  // Array constructor — a NativeFunction
-  let #(h, ctor_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(NativeArrayConstructor),
-        properties: dict.from_list([
-          #("prototype", value.builtin_property(JsObject(array_proto))),
-          #("name", value.builtin_property(JsString("Array"))),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ctor_ref)
-
-  // Array.isArray — static method on the constructor
-  let #(h, is_array_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(NativeArrayIsArray),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString("isArray"))),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, is_array_ref)
-
-  // Set Array.isArray on constructor (NOT enumerable)
-  let h = case heap.read(h, ctor_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(
-          properties,
-          "isArray",
-          value.builtin_property(JsObject(is_array_ref)),
-        )
-      heap.write(
-        h,
-        ctor_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
-  }
-
-  let h = set_constructor(h, array_proto, ctor_ref)
-
-  // Array.prototype.join — instance method
-  let #(h, join_ref) =
-    alloc_native_fn(h, function_proto, NativeArrayPrototypeJoin, "join", 1)
-  let h = add_method(h, array_proto, "join", join_ref)
-
-  // Array.prototype.push — instance method
-  let #(h, push_ref) =
-    alloc_native_fn(h, function_proto, NativeArrayPrototypePush, "push", 1)
-  let h = add_method(h, array_proto, "push", push_ref)
-
-  #(h, BuiltinType(prototype: array_proto, constructor: ctor_ref))
+  let #(h, proto_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("join", NativeArrayPrototypeJoin, 1),
+      #("push", NativeArrayPrototypePush, 1),
+    ])
+  let #(h, static_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("isArray", NativeArrayIsArray, 1),
+    ])
+  common.init_type(
+    h,
+    object_proto,
+    function_proto,
+    proto_methods,
+    fn(_) { NativeArrayConstructor },
+    "Array",
+    1,
+    static_methods,
+  )
 }
 
 /// Array() / new Array() — construct a new array.
 pub fn construct(
   args: List(JsValue),
-  heap: Heap,
+  state: State,
   array_proto: Ref,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  native_array_constructor(args, heap, array_proto)
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
+  let #(heap, result) = native_array_constructor(args, heap, array_proto)
+  #(State(..state, heap:), result)
 }
 
 /// Array.isArray(value) — check if a value is an array.
 pub fn is_array(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  #(heap, Ok(native_is_array(args, heap)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
+  #(State(..state, heap:), Ok(native_is_array(args, heap)))
 }
 
 /// Array() / new Array() constructor.
@@ -114,22 +70,18 @@ fn native_array_constructor(
   array_proto: Ref,
 ) -> #(Heap, Result(JsValue, JsValue)) {
   let #(length, elements) = case args {
-    [] -> #(0, dict.new())
+    [] -> #(0, js_elements.new())
     [JsNumber(value.Finite(n))] -> {
-      let len = float_to_int(n)
+      let len = value.float_to_int(n)
       case len >= 0 && int.to_float(len) == n {
-        True -> #(len, dict.new())
+        True -> #(len, js_elements.new())
         // Non-integer or negative: treat as single element
-        False -> #(1, dict.from_list([#(0, JsNumber(value.Finite(n)))]))
+        False -> #(1, js_elements.from_list([JsNumber(value.Finite(n))]))
       }
     }
     _ -> {
       let count = list.length(args)
-      let elems =
-        args
-        |> list.index_map(fn(val, idx) { #(idx, val) })
-        |> dict.from_list()
-      #(count, elems)
+      #(count, js_elements.from_list(args))
     }
   }
   let #(heap, ref) =
@@ -140,6 +92,7 @@ fn native_array_constructor(
         properties: dict.new(),
         elements:,
         prototype: Some(array_proto),
+        symbol_properties: dict.new(),
       ),
     )
   #(heap, Ok(JsObject(ref)))
@@ -157,99 +110,74 @@ fn native_is_array(args: List(JsValue), heap: Heap) -> JsValue {
   }
 }
 
-fn float_to_int(f: Float) -> Int {
-  case f <. 0.0 {
-    True -> 0 - float.truncate(float.negate(f))
-    False -> float.truncate(f)
-  }
-}
-
-/// Allocate a native function object on the heap, root it, and return the ref.
-fn alloc_native_fn(
-  h: Heap,
-  function_proto: Ref,
-  native: value.NativeFn,
-  name: String,
-  length: Int,
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(native),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(JsNumber(value.Finite(int.to_float(length)))),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Add a non-enumerable method property to an object on the heap.
-fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
-  }
-}
-
 /// Array.prototype.join(separator)
 /// Joins array elements into a string with the given separator (default ",").
 pub fn array_join(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) ->
-      case heap.read(heap, ref) {
+      case heap.read(state.heap, ref) {
         Ok(ObjectSlot(kind: ArrayObject(length:), elements:, ..)) -> {
-          let separator = case args {
-            [JsUndefined, ..] -> ","
-            [sep_val, ..] -> value.to_js_string(sep_val)
-            [] -> ","
+          let sep_val = case args {
+            [JsUndefined, ..] | [] -> JsString(",")
+            [v, ..] -> v
           }
-          let result = join_elements(elements, 0, length, separator, [])
-          #(heap, Ok(JsString(result)))
+          case frame.to_string(state, sep_val) {
+            Ok(#(separator, state)) ->
+              case join_elements(elements, 0, length, separator, [], state) {
+                #(state, Ok(result)) -> #(state, Ok(JsString(result)))
+                #(state, Error(thrown)) -> #(state, Error(thrown))
+              }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
         }
-        _ -> #(heap, Ok(JsString("")))
+        _ -> #(state, Ok(JsString("")))
       }
-    _ -> #(heap, Ok(JsString("")))
+    _ -> #(state, Ok(JsString("")))
   }
 }
 
 /// Iterate elements 0..length-1, converting each to string.
 /// undefined/null → empty string per spec.
 fn join_elements(
-  elements: dict.Dict(Int, JsValue),
+  elements: JsElements,
   idx: Int,
   length: Int,
   separator: String,
   acc: List(String),
-) -> String {
+  state: State,
+) -> #(State, Result(String, JsValue)) {
   case idx >= length {
-    True -> acc |> list.reverse |> string.join(separator)
+    True -> #(state, Ok(acc |> list.reverse |> string.join(separator)))
     False -> {
-      let str = case dict.get(elements, idx) {
-        Ok(JsUndefined) | Ok(JsNull) | Error(_) -> ""
-        Ok(val) -> value.to_js_string(val)
+      let val = js_elements.get(elements, idx)
+      case val {
+        JsUndefined | JsNull ->
+          join_elements(
+            elements,
+            idx + 1,
+            length,
+            separator,
+            ["", ..acc],
+            state,
+          )
+        _ ->
+          case frame.to_string(state, val) {
+            Ok(#(str, state)) ->
+              join_elements(
+                elements,
+                idx + 1,
+                length,
+                separator,
+                [str, ..acc],
+                state,
+              )
+            Error(#(thrown, state)) -> #(state, Error(thrown))
+          }
       }
-      join_elements(elements, idx + 1, length, separator, [str, ..acc])
     }
   }
 }
@@ -259,8 +187,9 @@ fn join_elements(
 pub fn array_push(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
   case this {
     JsObject(ref) ->
       case heap.read(heap, ref) {
@@ -269,6 +198,7 @@ pub fn array_push(
           properties:,
           elements:,
           prototype:,
+          symbol_properties:,
         )) -> {
           let #(new_elements, new_length) =
             push_elements(elements, args, length)
@@ -281,25 +211,29 @@ pub fn array_push(
                 properties:,
                 elements: new_elements,
                 prototype:,
+                symbol_properties:,
               ),
             )
-          #(heap, Ok(JsNumber(value.Finite(int.to_float(new_length)))))
+          #(
+            State(..state, heap:),
+            Ok(JsNumber(value.Finite(int.to_float(new_length)))),
+          )
         }
-        _ -> #(heap, Ok(JsNumber(value.Finite(0.0))))
+        _ -> #(State(..state, heap:), Ok(JsNumber(value.Finite(0.0))))
       }
-    _ -> #(heap, Ok(JsNumber(value.Finite(0.0))))
+    _ -> #(State(..state, heap:), Ok(JsNumber(value.Finite(0.0))))
   }
 }
 
-/// Insert args into elements dict starting at current length.
+/// Insert args into elements starting at current length.
 fn push_elements(
-  elements: dict.Dict(Int, JsValue),
+  elements: JsElements,
   args: List(JsValue),
   start: Int,
-) -> #(dict.Dict(Int, JsValue), Int) {
+) -> #(JsElements, Int) {
   case args {
     [] -> #(elements, start)
     [val, ..rest] ->
-      push_elements(dict.insert(elements, start, val), rest, start + 1)
+      push_elements(js_elements.set(elements, start, val), rest, start + 1)
   }
 }

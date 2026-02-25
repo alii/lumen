@@ -1,6 +1,6 @@
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
-import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/builtins/common.{type Builtins, Builtins}
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/function as builtins_function
 import arc/vm/builtins/generator as builtins_generator
@@ -9,38 +9,13 @@ import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/builtins/string as builtins_string
+import arc/vm/builtins/symbol as builtins_symbol
 import arc/vm/heap.{type Heap}
-import arc/vm/value.{
-  DataProperty, JsObject, JsUndefined, ObjectSlot, OrdinaryObject,
-}
+import arc/vm/js_elements
+import arc/vm/value.{JsObject, JsUndefined, ObjectSlot, OrdinaryObject}
 import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
-
-/// Pre-allocated prototype objects and constructor functions for JS built-ins.
-/// All refs are rooted so GC never collects them.
-pub type Builtins {
-  Builtins(
-    object: BuiltinType,
-    function: BuiltinType,
-    array: BuiltinType,
-    error: BuiltinType,
-    type_error: BuiltinType,
-    reference_error: BuiltinType,
-    range_error: BuiltinType,
-    syntax_error: BuiltinType,
-    math: value.Ref,
-    string: BuiltinType,
-    number: BuiltinType,
-    boolean: BuiltinType,
-    parse_int: value.Ref,
-    parse_float: value.Ref,
-    is_nan: value.Ref,
-    is_finite: value.Ref,
-    promise: BuiltinType,
-    generator: builtins_generator.GeneratorBuiltin,
-  )
-}
 
 /// Allocate and root all built-in prototype objects on the heap.
 /// Must be called once before running any JS code.
@@ -82,9 +57,40 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
   // Promise constructor + prototype
   let #(h, promise) = builtins_promise.init(h, object_proto, function.prototype)
 
-  // Generator.prototype (no constructor — generators are created by function*)
+  // %IteratorPrototype% — shared base for all iterators
+  // Has [Symbol.iterator]() { return this; } so iterators are iterable
+  let #(h, iterator_symbol_iterator) =
+    common.alloc_native_fn(
+      h,
+      function.prototype,
+      value.NativeIteratorSymbolIterator,
+      "[Symbol.iterator]",
+      0,
+    )
+  let #(h, iterator_proto) =
+    heap.alloc(
+      h,
+      ObjectSlot(
+        kind: OrdinaryObject,
+        properties: dict.new(),
+        symbol_properties: dict.from_list([
+          #(
+            value.symbol_iterator,
+            value.builtin_property(JsObject(iterator_symbol_iterator)),
+          ),
+        ]),
+        elements: js_elements.new(),
+        prototype: Some(object_proto),
+      ),
+    )
+  let h = heap.root(h, iterator_proto)
+
+  // Generator.prototype → %IteratorPrototype% → Object.prototype
   let #(h, generator) =
-    builtins_generator.init(h, object_proto, function.prototype)
+    builtins_generator.init(h, iterator_proto, function.prototype)
+
+  // Symbol constructor (callable, not new-able)
+  let #(h, symbol) = builtins_symbol.init(h, object_proto, function.prototype)
 
   #(
     h,
@@ -107,6 +113,7 @@ pub fn init(h: Heap) -> #(Heap, Builtins) {
       is_finite:,
       promise:,
       generator:,
+      symbol:,
     ),
   )
 }
@@ -138,21 +145,14 @@ pub fn globals(
     #("isNaN", JsObject(b.is_nan)),
     #("isFinite", JsObject(b.is_finite)),
     #("Promise", JsObject(b.promise.constructor)),
+    #("Symbol", JsObject(b.symbol)),
   ]
 
   // Create globalThis object with all global properties
   let properties =
     list.map(entries, fn(pair) {
       let #(name, val) = pair
-      #(
-        name,
-        DataProperty(
-          value: val,
-          writable: True,
-          enumerable: False,
-          configurable: True,
-        ),
-      )
+      #(name, value.builtin_property(val))
     })
     |> dict.from_list()
   let #(h, global_ref) =
@@ -161,7 +161,8 @@ pub fn globals(
       ObjectSlot(
         kind: OrdinaryObject,
         properties:,
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(b.object.prototype),
       ),
     )

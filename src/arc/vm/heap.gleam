@@ -50,17 +50,38 @@ pub fn alloc(heap: Heap, slot: HeapSlot) -> #(Heap, Ref) {
   }
 }
 
+/// Reserve a Ref without writing any slot. The address is allocated
+/// (consumed from the free list or bumped), but no data exists yet.
+/// Use `write` to fill it in later. This enables forward references
+/// for cyclic structures (e.g. proto ↔ constructor).
+pub fn reserve(heap: Heap) -> #(Heap, Ref) {
+  case heap.free {
+    [id, ..rest] -> #(Heap(..heap, free: rest), Ref(id))
+    [] -> {
+      let id = heap.next
+      #(Heap(..heap, next: id + 1), Ref(id))
+    }
+  }
+}
+
 /// Read a slot by ref. Returns Error(Nil) if the ref is dangling.
 pub fn read(heap: Heap, ref: Ref) -> Result(HeapSlot, Nil) {
   dict.get(heap.data, ref.id)
 }
 
-/// Overwrite a slot. No-op if the ref doesn't exist in the heap.
+/// Overwrite a slot. No-op if the ref doesn't exist in the heap
+/// (i.e. was never allocated or reserved).
 pub fn write(heap: Heap, ref: Ref, slot: HeapSlot) -> Heap {
   case dict.has_key(heap.data, ref.id) {
     True -> Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
     False -> heap
   }
+}
+
+/// Write a slot at a ref unconditionally. Used to fill reserved
+/// (forward-reference) slots that have no data in the heap yet.
+pub fn fill(heap: Heap, ref: Ref, slot: HeapSlot) -> Heap {
+  Heap(..heap, data: dict.insert(heap.data, ref.id, slot))
 }
 
 /// Mark a ref as a persistent GC root.

@@ -4,6 +4,7 @@
 /// Two-pass algorithm:
 ///   Pass 1: Walk IR, skip IrLabel markers, build Dict(label_id → PC)
 ///   Pass 2: Walk IR, replace IrJump(label) → Jump(pc), drop IrLabel, translate all Ir* → Op
+import arc/vm/array
 import arc/vm/opcode.{
   type FuncTemplate, type IrOp, type Op, FuncTemplate, IrArrayFrom, IrAwait,
   IrBinOp, IrBoxLocal, IrCall, IrCallApply, IrCallConstructor, IrCallMethod,
@@ -48,9 +49,9 @@ pub fn resolve(
     name:,
     arity:,
     local_count:,
-    bytecode: ops,
-    constants:,
-    functions:,
+    bytecode: array.from_list(ops),
+    constants: array.from_list(constants),
+    functions: array.from_list(functions),
     env_descriptors:,
     is_strict:,
     is_arrow:,

@@ -1,6 +1,7 @@
 import arc/compiler
 import arc/parser
 import arc/vm/builtins
+import arc/vm/builtins/common
 import arc/vm/heap
 import arc/vm/value.{
   Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined, NaN,
@@ -32,7 +33,7 @@ fn run_js(source: String) -> Result(vm.Completion, String) {
           let #(h, b) = builtins.init(h)
           let #(h, globals) = builtins.globals(b, h)
           case vm.run_with_globals(template, h, b, globals) {
-            Ok(completion) -> Ok(completion)
+            Ok(#(completion, _state)) -> Ok(completion)
             Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
           }
         }
@@ -3399,6 +3400,8 @@ fn run_repl_lines(
       globals:,
       closure_templates: dict.new(),
       const_globals: set.new(),
+      next_symbol_id: 100,
+      symbol_descriptions: dict.new(),
     )
   run_repl_lines_loop(lines, h, b, env)
 }
@@ -3406,7 +3409,7 @@ fn run_repl_lines(
 fn run_repl_lines_loop(
   lines: List(String),
   h: heap.Heap,
-  b: builtins.Builtins,
+  b: common.Builtins,
   env: vm.ReplEnv,
 ) -> Result(#(value.JsValue, heap.Heap), String) {
   case lines {
@@ -3431,7 +3434,7 @@ fn run_repl_lines_loop(
 fn eval_repl_line(
   source: String,
   h: heap.Heap,
-  b: builtins.Builtins,
+  b: common.Builtins,
   env: vm.ReplEnv,
 ) -> Result(#(value.JsValue, heap.Heap, vm.ReplEnv), String) {
   case parser.parse(source, parser.Script) {
@@ -3467,6 +3470,8 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
       globals:,
       closure_templates: dict.new(),
       const_globals: set.new(),
+      next_symbol_id: 100,
+      symbol_descriptions: dict.new(),
     )
   run_repl_throw_loop(lines, h, b, env)
 }
@@ -3474,7 +3479,7 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
 fn run_repl_throw_loop(
   lines: List(String),
   h: heap.Heap,
-  b: builtins.Builtins,
+  b: common.Builtins,
   env: vm.ReplEnv,
 ) -> Result(Nil, String) {
   case lines {
@@ -3564,4 +3569,136 @@ pub fn globalthis_typeof_test() {
 
 pub fn globalthis_has_builtins_test() {
   assert_normal("globalThis.Object === Object", JsBool(True))
+}
+
+// ============================================================================
+// Symbol tests
+// ============================================================================
+
+pub fn typeof_symbol_test() {
+  assert_normal("typeof Symbol.toStringTag", JsString("symbol"))
+}
+
+pub fn symbol_equality_test() {
+  assert_normal("Symbol('x') === Symbol('x')", JsBool(False))
+}
+
+pub fn symbol_equality_same_test() {
+  assert_normal("var s = Symbol(); s === s", JsBool(True))
+}
+
+pub fn symbol_property_test() {
+  assert_normal(
+    "var s = Symbol(); var o = {}; o[s] = 42; o[s]",
+    JsNumber(Finite(42.0)),
+  )
+}
+
+pub fn symbol_to_string_tag_math_test() {
+  assert_normal("Math[Symbol.toStringTag]", JsString("Math"))
+}
+
+pub fn symbol_to_string_tag_custom_test() {
+  assert_normal(
+    "var o = {}; o[Symbol.toStringTag] = 'Foo'; typeof o",
+    JsString("object"),
+  )
+}
+
+pub fn symbol_well_known_iterator_test() {
+  assert_normal("typeof Symbol.iterator", JsString("symbol"))
+}
+
+pub fn symbol_constructor_no_args_test() {
+  assert_normal("typeof Symbol()", JsString("symbol"))
+}
+
+// ============================================================================
+// ToPrimitive + Object.prototype.toString/valueOf
+// ============================================================================
+
+pub fn object_to_string_plain_test() {
+  assert_normal("var o = {}; o.toString()", JsString("[object Object]"))
+}
+
+pub fn object_to_string_array_test() {
+  assert_normal(
+    "Object.prototype.toString.call([1,2,3])",
+    JsString("[object Array]"),
+  )
+}
+
+pub fn object_to_string_function_test() {
+  assert_normal(
+    "Object.prototype.toString.call(function(){})",
+    JsString("[object Function]"),
+  )
+}
+
+pub fn object_to_string_null_test() {
+  assert_normal(
+    "Object.prototype.toString.call(null)",
+    JsString("[object Null]"),
+  )
+}
+
+pub fn object_to_string_undefined_test() {
+  assert_normal(
+    "Object.prototype.toString.call(undefined)",
+    JsString("[object Undefined]"),
+  )
+}
+
+pub fn object_value_of_test() {
+  assert_normal("var o = {}; o.valueOf() === o", JsBool(True))
+}
+
+pub fn to_primitive_custom_to_string_test() {
+  assert_normal(
+    "var o = { toString: function() { return 'hello'; } }; '' + o",
+    JsString("hello"),
+  )
+}
+
+pub fn to_primitive_custom_value_of_test() {
+  assert_normal_number(
+    "var o = { valueOf: function() { return 42; } }; o + 1",
+    43.0,
+  )
+}
+
+pub fn to_primitive_string_function_test() {
+  assert_normal(
+    "var o = { toString: function() { return 'custom'; } }; String(o)",
+    JsString("custom"),
+  )
+}
+
+pub fn to_primitive_add_both_objects_test() {
+  assert_normal(
+    "var a = { valueOf: function() { return 1; } };
+     var b = { valueOf: function() { return 2; } };
+     a + b",
+    JsNumber(Finite(3.0)),
+  )
+}
+
+pub fn to_primitive_add_string_concat_test() {
+  assert_normal(
+    "var o = { toString: function() { return 'world'; } };
+     'hello ' + o",
+    JsString("hello world"),
+  )
+}
+
+pub fn to_primitive_default_to_string_test() {
+  // Default Object.prototype.toString returns "[object Object]"
+  assert_normal("'' + {}", JsString("[object Object]"))
+}
+
+pub fn object_to_string_tag_test() {
+  assert_normal(
+    "var o = {}; o[Symbol.toStringTag] = 'MyTag'; Object.prototype.toString.call(o)",
+    JsString("[object MyTag]"),
+  )
 }

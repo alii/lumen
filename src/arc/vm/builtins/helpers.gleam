@@ -1,13 +1,13 @@
-/// Shared helpers for builtins that can't import higher-level modules
+/// Shared runtime helpers for builtins that can't import higher-level modules
 /// like object.gleam (due to import cycles: object -> builtins -> builtins/*).
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, DataProperty, JsObject, JsString, NativeFunction,
-  ObjectSlot,
+  type JsValue, type Ref, DataProperty, Finite, JsNumber, JsObject, JsString,
+  JsUndefined, NaN, ObjectSlot,
 }
 import gleam/dict
 import gleam/int
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 
 /// Walk the prototype chain to find a property by key.
 /// Lightweight version of object.get_property that avoids the import cycle.
@@ -37,55 +37,68 @@ pub fn is_callable(h: Heap, val: JsValue) -> Bool {
     JsObject(ref) ->
       case heap.read(h, ref) {
         Ok(ObjectSlot(kind: value.FunctionObject(..), ..)) -> True
-        Ok(ObjectSlot(kind: NativeFunction(_), ..)) -> True
+        Ok(ObjectSlot(kind: value.NativeFunction(_), ..)) -> True
         _ -> False
       }
     _ -> False
   }
 }
 
-/// Allocate a NativeFunction ObjectSlot with standard name/length properties.
-pub fn alloc_native_fn(
-  h: Heap,
-  function_proto: Ref,
-  native: value.NativeFn,
-  name: String,
-  arity: Int,
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(native),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(
-              value.JsNumber(value.Finite(int.to_float(arity))),
-            ),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Add a method property (writable, configurable, NOT enumerable) to an object.
-pub fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
+/// Get element at index from a list (0-based). O(n).
+pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
+  case idx, lst {
+    0, [x, ..] -> Some(x)
+    n, [_, ..rest] -> list_at(rest, n - 1)
+    _, [] -> None
   }
 }
+
+/// Convert a JsValue to an integer (truncating floats).
+/// Returns Error(Nil) for NaN, Infinity, undefined.
+pub fn to_number_int(val: JsValue) -> Result(Int, Nil) {
+  case val {
+    JsNumber(Finite(n)) -> Ok(value.float_to_int(n))
+    JsNumber(_) -> Error(Nil)
+    JsUndefined -> Error(Nil)
+    value.JsNull -> Ok(0)
+    value.JsBool(True) -> Ok(1)
+    value.JsBool(False) -> Ok(0)
+    JsString(s) ->
+      case int.parse(s) {
+        Ok(n) -> Ok(n)
+        Error(_) ->
+          case gleam_stdlib_parse_float(s) {
+            Ok(f) -> Ok(value.float_to_int(f))
+            Error(_) -> Error(Nil)
+          }
+      }
+    _ -> Error(Nil)
+  }
+}
+
+/// Get an integer argument at position `idx`, with a default if missing or not numeric.
+pub fn get_int_arg(args: List(JsValue), idx: Int, default: Int) -> Int {
+  case list_at(args, idx) {
+    Some(v) ->
+      case to_number_int(v) {
+        Ok(n) -> n
+        Error(_) -> default
+      }
+    None -> default
+  }
+}
+
+/// Get a numeric (JsNum) argument at position `idx`, defaulting to NaN.
+pub fn get_num_arg(
+  args: List(JsValue),
+  idx: Int,
+  to_number: fn(JsValue) -> value.JsNum,
+) -> value.JsNum {
+  case list_at(args, idx) {
+    Some(v) -> to_number(v)
+    None -> NaN
+  }
+}
+
+@external(erlang, "gleam_stdlib", "parse_float")
+fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)

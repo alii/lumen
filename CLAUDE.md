@@ -329,10 +329,48 @@ let timer = case state.timer {
 let timer = option.lazy_or(state.timer, fn() { Some(create_new_timer()) })
 ```
 
-## 6. result.try with use for chained Results
+## 6. ALWAYS use `use` with result.try/result.map — identity error propagation is BANNED
 
+**Any time you write `Error(e) -> Error(e)` or `Error(err) -> Error(err)`, you MUST refactor to use `use` with `result.try` or `result.map`.** This is the most common anti-pattern in the codebase and it is never acceptable.
+
+**`result.try`** — when the body returns a `Result`:
 ```gleam
-// BAD - nested case on Results
+// BAD — identity error propagation
+case first_operation() {
+  Ok(value) -> second_operation(value)  // returns Result
+  Error(e) -> Error(e)
+}
+
+// GOOD
+use value <- result.try(first_operation())
+second_operation(value)
+```
+
+**`result.map`** — when the body returns a plain value (not Result):
+```gleam
+// BAD
+case parse_expression(parser) {
+  Ok(#(p, expr)) -> Ok(transform(expr))
+  Error(e) -> Error(e)
+}
+
+// GOOD
+use #(p, expr) <- result.map(parse_expression(parser))
+transform(expr)
+```
+
+**When the Ok value is `Nil`, bind `Nil` — NEVER use `_`:**
+```gleam
+// BAD — discards the pattern, unclear what the Ok value is
+use _ <- result.try(validate_something(input))
+
+// GOOD — makes it explicit that Ok(Nil) is the success case
+use Nil <- result.try(validate_something(input))
+```
+
+**Chained operations:**
+```gleam
+// BAD — nested case pyramid
 case first_operation() {
   Ok(value1) ->
     case second_operation(value1) {
@@ -342,7 +380,7 @@ case first_operation() {
   Error(_) -> Error(Nil)
 }
 
-// GOOD - use with result.try
+// GOOD — flat chain with use
 use value1 <- result.try(first_operation() |> result.map_error(fn(_) { Nil }))
 second_operation(value1) |> result.map_error(fn(_) { Nil })
 ```
@@ -491,9 +529,20 @@ decode.success(Identify(token))
 
 **Rule**: `bool.guard` is for when you _already have_ a boolean. Don't convert a value to a boolean just to use `bool.guard` — pattern match on the value directly instead.
 
-## 10. The `use` keyword for callbacks
+## 10. The `use` keyword for callbacks — MANDATORY for callback-last functions
 
-`use` flattens callback-heavy code. It works with any function that takes a callback as its last argument. Everything after the `use` becomes the callback body:
+`use` flattens callback-heavy code. It works with any function that takes a callback as its last argument. Everything after the `use` becomes the callback body. **You MUST use `use` syntax whenever calling a function that takes a callback as its last argument.** Never pass an inline `fn(...) { ... }` when `use` is available.
+
+```gleam
+// BAD — inline callback
+math_unary(args, state, fn(x) {
+  Finite(float.absolute_value(x))
+})
+
+// GOOD — use syntax
+use x <- math_unary(args, state)
+Finite(float.absolute_value(x))
+```
 
 ```gleam
 // Common patterns:
@@ -509,6 +558,19 @@ use conn <- with_connection()
 ```
 
 The `use` expression scopes to the current block—use braces to limit scope when needed.
+
+**BUT: pass functions directly when they already have the right signature** — don't wrap in `use`:
+
+```gleam
+// BAD — wrapping a function that already has the right signature
+use v <- conditional_jump(state, target)
+value.is_truthy(v)
+
+// GOOD — pass the function directly
+conditional_jump(state, target, value.is_truthy)
+```
+
+**Rule**: If the callback body is just `some_function(x)` where `x` is the `use` binding, you should pass `some_function` directly instead of using `use`.
 
 ## 11. Record constructors as functions
 

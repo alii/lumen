@@ -1,3 +1,4 @@
+import arc/vm/array.{type Array}
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
@@ -12,6 +13,36 @@ pub type Ref {
 /// Unique symbol identity. Not heap-allocated — symbols are value types on BEAM.
 pub type SymbolId {
   SymbolId(id: Int)
+}
+
+// Well-known symbol constants. IDs 1-20 reserved for well-knowns;
+// user-created symbols start at 100.
+pub const symbol_to_string_tag = SymbolId(1)
+
+pub const symbol_iterator = SymbolId(2)
+
+pub const symbol_has_instance = SymbolId(3)
+
+pub const symbol_is_concat_spreadable = SymbolId(4)
+
+pub const symbol_to_primitive = SymbolId(5)
+
+pub const symbol_species = SymbolId(6)
+
+pub const symbol_async_iterator = SymbolId(7)
+
+/// Get the description string for a well-known symbol.
+pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
+  case id.id {
+    1 -> Some("Symbol.toStringTag")
+    2 -> Some("Symbol.iterator")
+    3 -> Some("Symbol.hasInstance")
+    4 -> Some("Symbol.isConcatSpreadable")
+    5 -> Some("Symbol.toPrimitive")
+    6 -> Some("Symbol.species")
+    7 -> Some("Symbol.asyncIterator")
+    _ -> None
+  }
 }
 
 /// Wrapper around BEAM's native arbitrary-precision integer.
@@ -48,6 +79,19 @@ pub type JsValue {
   JsUninitialized
 }
 
+/// Dual-representation JS array elements.
+///
+/// Dense: Erlang tuple — O(1) get, O(n) set (single BIF). For normal arrays.
+/// Sparse: Dict — O(log n) get/set. For arrays with huge gaps (e.g. `a[100000] = 1`).
+///
+/// Operations on this type are in `arc/vm/js_elements`.
+pub type JsElements {
+  DenseElements(data: Array(JsValue))
+  SparseElements(data: Dict(Int, JsValue))
+}
+
+/// Callback for ToString that supports ToPrimitive (VM re-entry for objects).
+/// Builtins receive this from the dispatch layer to break the vm↔builtins cycle.
 /// Identifies a built-in native function. Used by `NativeFunction` to dispatch
 /// to the correct Gleam implementation when called from JS.
 pub type NativeFn {
@@ -167,6 +211,14 @@ pub type NativeFn {
   /// async_data_ref points to AsyncFunctionSlot on heap.
   /// is_reject: False → fulfilled (push resolved value), True → rejected (throw value)
   NativeAsyncResume(async_data_ref: Ref, is_reject: Bool)
+  /// Symbol() constructor — callable but NOT new-able.
+  NativeSymbolConstructor
+  /// Object.prototype.toString() — ES2024 §19.1.3.6.
+  NativeObjectPrototypeToString
+  /// Object.prototype.valueOf() — ES2024 §19.1.3.7.
+  NativeObjectPrototypeValueOf
+  /// %IteratorPrototype%[Symbol.iterator]() — returns `this`.
+  NativeIteratorSymbolIterator
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -199,20 +251,43 @@ pub type Property {
   )
 }
 
+/// Base builder: DataProperty with all flags False.
+pub fn data(val: JsValue) -> Property {
+  DataProperty(
+    value: val,
+    writable: False,
+    enumerable: False,
+    configurable: False,
+  )
+}
+
+/// Set writable to True.
+pub fn writable(prop: Property) -> Property {
+  let DataProperty(value:, enumerable:, configurable:, ..) = prop
+  DataProperty(value:, writable: True, enumerable:, configurable:)
+}
+
+/// Set enumerable to True.
+pub fn enumerable(prop: Property) -> Property {
+  let DataProperty(value:, writable:, configurable:, ..) = prop
+  DataProperty(value:, writable:, enumerable: True, configurable:)
+}
+
+/// Set configurable to True.
+pub fn configurable(prop: Property) -> Property {
+  let DataProperty(value:, writable:, enumerable:, ..) = prop
+  DataProperty(value:, writable:, enumerable:, configurable: True)
+}
+
 /// Normal assignment: all flags true (obj.x = val, object literals, etc.)
 pub fn data_property(val: JsValue) -> Property {
-  DataProperty(value: val, writable: True, enumerable: True, configurable: True)
+  data(val) |> writable() |> enumerable() |> configurable()
 }
 
 /// Built-in methods/prototype props: writable+configurable, NOT enumerable.
 /// This matches QuickJS and the spec for built-in function properties.
 pub fn builtin_property(val: JsValue) -> Property {
-  DataProperty(
-    value: val,
-    writable: True,
-    enumerable: False,
-    configurable: True,
-  )
+  data(val) |> writable() |> configurable()
 }
 
 /// Extract refs reachable from a Property.
@@ -309,8 +384,9 @@ pub type HeapSlot {
   ObjectSlot(
     kind: ExoticKind,
     properties: Dict(String, Property),
-    elements: Dict(Int, JsValue),
+    elements: JsElements,
     prototype: Option(Ref),
+    symbol_properties: Dict(SymbolId, Property),
   )
   /// Flat environment frame. Multiple closures in the same scope reference
   /// the same EnvSlot, so mutations to captured variables are visible across them.
@@ -349,7 +425,7 @@ pub type HeapSlot {
     func_template_id: Int,
     env_ref: Ref,
     saved_pc: Int,
-    saved_locals: List(JsValue),
+    saved_locals: Array(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
     saved_finally_stack: List(SavedFinallyCompletion),
@@ -364,7 +440,7 @@ pub type HeapSlot {
     func_template_id: Int,
     env_ref: Ref,
     saved_pc: Int,
-    saved_locals: List(JsValue),
+    saved_locals: Array(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(SavedTryFrame),
     saved_finally_stack: List(SavedFinallyCompletion),
@@ -390,13 +466,19 @@ pub fn refs_in_value(value: JsValue) -> List(Ref) {
 /// Extract all refs reachable from a heap slot by walking its JsValues.
 pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
   case slot {
-    ObjectSlot(kind:, properties:, elements:, prototype:) -> {
+    ObjectSlot(kind:, properties:, elements:, prototype:, symbol_properties:) -> {
       let prop_refs =
         dict.values(properties)
         |> list.flat_map(refs_in_property)
-      let elem_refs =
-        dict.values(elements)
-        |> list.flat_map(refs_in_value)
+      let sym_prop_refs =
+        dict.values(symbol_properties)
+        |> list.flat_map(refs_in_property)
+      let elem_refs = case elements {
+        DenseElements(data) ->
+          array.to_list(data) |> list.flat_map(refs_in_value)
+        SparseElements(data) ->
+          dict.values(data) |> list.flat_map(refs_in_value)
+      }
       let proto_refs = case prototype {
         Some(ref) -> [ref]
         None -> []
@@ -436,7 +518,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         GeneratorObject(generator_data:) -> [generator_data]
         OrdinaryObject | ArrayObject(_) | NativeFunction(_) -> []
       }
-      list.flatten([prop_refs, elem_refs, proto_refs, kind_refs])
+      list.flatten([prop_refs, sym_prop_refs, elem_refs, proto_refs, kind_refs])
     }
     EnvSlot(slots:) -> list.flat_map(slots, refs_in_value)
     BoxSlot(value:) -> refs_in_value(value)
@@ -481,7 +563,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         })
       list.flatten([
         [env_ref],
-        list.flat_map(saved_locals, refs_in_value),
+        array.to_list(saved_locals) |> list.flat_map(refs_in_value),
         list.flat_map(saved_stack, refs_in_value),
         finally_refs,
         refs_in_value(saved_this),
@@ -511,33 +593,12 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         refs_in_value(resolve),
         refs_in_value(reject),
         [env_ref],
-        list.flat_map(saved_locals, refs_in_value),
+        array.to_list(saved_locals) |> list.flat_map(refs_in_value),
         list.flat_map(saved_stack, refs_in_value),
         finally_refs,
         refs_in_value(saved_this),
       ])
     }
-  }
-}
-
-/// Convert a JsValue to its JS string representation (ToString abstract op).
-/// Note: for objects this returns "[object Object]" — proper toString/valueOf
-/// dispatch requires heap access and should be done at the call site.
-pub fn to_js_string(val: JsValue) -> String {
-  case val {
-    JsUndefined -> "undefined"
-    JsNull -> "null"
-    JsBool(True) -> "true"
-    JsBool(False) -> "false"
-    JsNumber(Finite(n)) -> js_format_number(n)
-    JsNumber(NaN) -> "NaN"
-    JsNumber(Infinity) -> "Infinity"
-    JsNumber(NegInfinity) -> "-Infinity"
-    JsString(s) -> s
-    JsBigInt(BigInt(n)) -> int.to_string(n)
-    JsSymbol(_) -> "Symbol()"
-    JsObject(_) -> "[object Object]"
-    JsUninitialized -> "undefined"
   }
 }
 
@@ -547,5 +608,28 @@ pub fn js_format_number(n: Float) -> String {
   case int.to_float(truncated) == n {
     True -> int.to_string(truncated)
     False -> float.to_string(n)
+  }
+}
+
+/// JS ToBoolean: https://tc39.es/ecma262/#sec-toboolean
+pub fn is_truthy(val: JsValue) -> Bool {
+  case val {
+    JsUndefined | JsNull | JsUninitialized -> False
+    JsBool(b) -> b
+    JsNumber(NaN) -> False
+    JsNumber(Finite(n)) -> n != 0.0
+    JsNumber(Infinity) | JsNumber(NegInfinity) -> True
+    JsString(s) -> s != ""
+    JsBigInt(BigInt(n)) -> n != 0
+    JsObject(_) | JsSymbol(_) -> True
+  }
+}
+
+/// Truncate a JS float to integer. Handles negatives correctly
+/// (truncates toward zero, matching JS `Math.trunc` / `ToInt32` semantics).
+pub fn float_to_int(f: Float) -> Int {
+  case f <. 0.0 {
+    True -> 0 - float.truncate(float.negate(f))
+    False -> float.truncate(f)
   }
 }

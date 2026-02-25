@@ -1,7 +1,9 @@
 import arc/compiler
 import arc/parser
-import arc/vm/builtins.{type Builtins}
+import arc/vm/builtins
+import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap.{type Heap}
+import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, FunctionObject,
   GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PromiseObject,
@@ -11,6 +13,7 @@ import gleam/dict
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/set
 import gleam/string
 
@@ -43,7 +46,11 @@ fn inspect_inner(h: Heap, val: JsValue, depth: Int, seen: List(Int)) -> String {
     value.JsNumber(value.Infinity) -> "Infinity"
     value.JsNumber(value.NegInfinity) -> "-Infinity"
     value.JsString(s) -> "'" <> escape_string(s) <> "'"
-    value.JsSymbol(_) -> "Symbol()"
+    value.JsSymbol(sym_id) ->
+      case value.well_known_symbol_description(sym_id) {
+        Some(desc) -> "Symbol(" <> desc <> ")"
+        None -> "Symbol()"
+      }
     value.JsBigInt(value.BigInt(n)) -> int.to_string(n) <> "n"
     value.JsUninitialized -> "undefined"
     value.JsObject(ref) -> inspect_object(h, ref, depth, seen)
@@ -66,15 +73,29 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: List(Int)) -> String {
     False -> {
       let seen = [ref.id, ..seen]
       case heap.read(h, ref) {
-        Ok(ObjectSlot(kind:, properties:, elements:, ..)) ->
+        Ok(ObjectSlot(kind:, properties:, elements:, symbol_properties:, ..)) ->
           case kind {
             ArrayObject(length:) ->
               inspect_array(h, elements, length, depth, seen)
             FunctionObject(..) -> inspect_function(properties)
             NativeFunction(_) -> inspect_function(properties)
-            OrdinaryObject -> inspect_plain_object(h, properties, depth, seen)
+            OrdinaryObject ->
+              inspect_tagged_object(
+                h,
+                properties,
+                symbol_properties,
+                depth,
+                seen,
+              )
             PromiseObject(_) -> "Promise {}"
-            GeneratorObject(_) -> "Object [Generator] {}"
+            GeneratorObject(_) ->
+              inspect_tagged_object(
+                h,
+                properties,
+                symbol_properties,
+                depth,
+                seen,
+              )
           }
         _ -> "[Object]"
       }
@@ -84,7 +105,7 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: List(Int)) -> String {
 
 fn inspect_array(
   h: Heap,
-  elements: dict.Dict(Int, JsValue),
+  elements: value.JsElements,
   length: Int,
   depth: Int,
   seen: List(Int),
@@ -94,9 +115,9 @@ fn inspect_array(
     False -> {
       let items =
         int.range(from: 0, to: length, with: [], run: fn(acc, i) {
-          let s = case dict.get(elements, i) {
-            Ok(v) -> inspect_inner(h, v, depth + 1, seen)
-            Error(_) -> "<empty>"
+          let s = case js_elements.get_option(elements, i) {
+            Some(v) -> inspect_inner(h, v, depth + 1, seen)
+            None -> "<empty>"
           }
           list.append(acc, [s])
         })
@@ -113,6 +134,25 @@ fn inspect_function(properties: dict.Dict(String, value.Property)) -> String {
   case name {
     "" -> "[Function (anonymous)]"
     n -> "[Function: " <> n <> "]"
+  }
+}
+
+/// Inspect an object, checking for Symbol.toStringTag to add a tag prefix.
+fn inspect_tagged_object(
+  h: Heap,
+  properties: dict.Dict(String, value.Property),
+  symbol_properties: dict.Dict(value.SymbolId, value.Property),
+  depth: Int,
+  seen: List(Int),
+) -> String {
+  let tag = case dict.get(symbol_properties, value.symbol_to_string_tag) {
+    Ok(DataProperty(value: value.JsString(t), ..)) -> Some(t)
+    _ -> None
+  }
+  let body = inspect_plain_object(h, properties, depth, seen)
+  case tag {
+    Some(t) -> "Object [" <> t <> "] " <> body
+    None -> body
   }
 }
 
@@ -248,6 +288,8 @@ fn repl_loop(state: ReplState) -> Nil {
               globals:,
               closure_templates: dict.new(),
               const_globals: set.new(),
+              next_symbol_id: 100,
+              symbol_descriptions: dict.new(),
             )
           let state = ReplState(heap: h, builtins: b, env:)
           clear()
@@ -288,6 +330,8 @@ pub fn main() -> Nil {
       globals:,
       closure_templates: dict.new(),
       const_globals: set.new(),
+      next_symbol_id: 100,
+      symbol_descriptions: dict.new(),
     )
   let state = ReplState(heap: h, builtins: b, env:)
   repl_loop(state)

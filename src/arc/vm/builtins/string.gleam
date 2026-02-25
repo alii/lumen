@@ -1,11 +1,10 @@
-import arc/vm/builtins/common.{
-  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
-}
+import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/builtins/helpers
+import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, Finite, JsNumber, JsObject, JsString,
-  JsUndefined, NaN, NativeFunction, NativeStringConstructor,
-  NativeStringPrototypeAt, NativeStringPrototypeCharAt,
+  type JsValue, type Ref, Finite, JsNumber, JsObject, JsString, JsUndefined, NaN,
+  NativeStringConstructor, NativeStringPrototypeAt, NativeStringPrototypeCharAt,
   NativeStringPrototypeCharCodeAt, NativeStringPrototypeConcat,
   NativeStringPrototypeEndsWith, NativeStringPrototypeIncludes,
   NativeStringPrototypeIndexOf, NativeStringPrototypeLastIndexOf,
@@ -15,13 +14,10 @@ import arc/vm/value.{
   NativeStringPrototypeSubstring, NativeStringPrototypeToLowerCase,
   NativeStringPrototypeToString, NativeStringPrototypeToUpperCase,
   NativeStringPrototypeTrim, NativeStringPrototypeTrimEnd,
-  NativeStringPrototypeTrimStart, NativeStringPrototypeValueOf, ObjectSlot,
+  NativeStringPrototypeTrimStart, NativeStringPrototypeValueOf,
 }
-import gleam/dict
-import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
 import gleam/string
 
 /// Set up String constructor + String.prototype.
@@ -30,73 +26,55 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType) {
-  let #(h, string_proto) = alloc_proto(h, Some(object_proto), dict.new())
-
-  // Add all String.prototype methods
-  let methods = [
-    #("charAt", NativeStringPrototypeCharAt, 1),
-    #("charCodeAt", NativeStringPrototypeCharCodeAt, 1),
-    #("indexOf", NativeStringPrototypeIndexOf, 1),
-    #("lastIndexOf", NativeStringPrototypeLastIndexOf, 1),
-    #("includes", NativeStringPrototypeIncludes, 1),
-    #("startsWith", NativeStringPrototypeStartsWith, 1),
-    #("endsWith", NativeStringPrototypeEndsWith, 1),
-    #("slice", NativeStringPrototypeSlice, 2),
-    #("substring", NativeStringPrototypeSubstring, 2),
-    #("toLowerCase", NativeStringPrototypeToLowerCase, 0),
-    #("toUpperCase", NativeStringPrototypeToUpperCase, 0),
-    #("trim", NativeStringPrototypeTrim, 0),
-    #("trimStart", NativeStringPrototypeTrimStart, 0),
-    #("trimEnd", NativeStringPrototypeTrimEnd, 0),
-    #("split", NativeStringPrototypeSplit, 2),
-    #("concat", NativeStringPrototypeConcat, 1),
-    #("toString", NativeStringPrototypeToString, 0),
-    #("valueOf", NativeStringPrototypeValueOf, 0),
-    #("repeat", NativeStringPrototypeRepeat, 1),
-    #("padStart", NativeStringPrototypePadStart, 1),
-    #("padEnd", NativeStringPrototypePadEnd, 1),
-    #("at", NativeStringPrototypeAt, 1),
-  ]
-
-  let h =
-    list.fold(methods, h, fn(h, method) {
-      let #(name, native, length) = method
-      let #(h, fn_ref) =
-        alloc_native_fn(h, function_proto, native, name, length)
-      add_method(h, string_proto, name, fn_ref)
-    })
-
-  // String constructor
-  let #(h, ctor_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(NativeStringConstructor),
-        properties: dict.from_list([
-          #("prototype", value.builtin_property(JsObject(string_proto))),
-          #("name", value.builtin_property(JsString("String"))),
-          #("length", value.builtin_property(JsNumber(Finite(1.0)))),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ctor_ref)
-  let h = set_constructor(h, string_proto, ctor_ref)
-
-  #(h, BuiltinType(prototype: string_proto, constructor: ctor_ref))
+  let #(h, proto_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("charAt", NativeStringPrototypeCharAt, 1),
+      #("charCodeAt", NativeStringPrototypeCharCodeAt, 1),
+      #("indexOf", NativeStringPrototypeIndexOf, 1),
+      #("lastIndexOf", NativeStringPrototypeLastIndexOf, 1),
+      #("includes", NativeStringPrototypeIncludes, 1),
+      #("startsWith", NativeStringPrototypeStartsWith, 1),
+      #("endsWith", NativeStringPrototypeEndsWith, 1),
+      #("slice", NativeStringPrototypeSlice, 2),
+      #("substring", NativeStringPrototypeSubstring, 2),
+      #("toLowerCase", NativeStringPrototypeToLowerCase, 0),
+      #("toUpperCase", NativeStringPrototypeToUpperCase, 0),
+      #("trim", NativeStringPrototypeTrim, 0),
+      #("trimStart", NativeStringPrototypeTrimStart, 0),
+      #("trimEnd", NativeStringPrototypeTrimEnd, 0),
+      #("split", NativeStringPrototypeSplit, 2),
+      #("concat", NativeStringPrototypeConcat, 1),
+      #("toString", NativeStringPrototypeToString, 0),
+      #("valueOf", NativeStringPrototypeValueOf, 0),
+      #("repeat", NativeStringPrototypeRepeat, 1),
+      #("padStart", NativeStringPrototypePadStart, 1),
+      #("padEnd", NativeStringPrototypePadEnd, 1),
+      #("at", NativeStringPrototypeAt, 1),
+    ])
+  common.init_type(
+    h,
+    object_proto,
+    function_proto,
+    proto_methods,
+    fn(_) { NativeStringConstructor },
+    "String",
+    1,
+    [],
+  )
 }
 
 /// String() called as a function — type coercion to string.
 pub fn call_as_function(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let result = case args {
-    [] -> JsString("")
-    [val, ..] -> JsString(value.to_js_string(val))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case args {
+    [] -> #(state, Ok(JsString("")))
+    [val, ..] -> {
+      use s, state <- frame.try_to_string(state, val)
+      #(state, Ok(JsString(s)))
+    }
   }
-  #(heap, Ok(result))
 }
 
 // ============================================================================
@@ -107,14 +85,18 @@ pub fn call_as_function(
 pub fn string_char_at(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let idx = get_int_arg(args, 0, 0)
-  let len = string.length(s)
-  case idx >= 0 && idx < len {
-    True -> #(heap, Ok(JsString(string.slice(s, idx, 1))))
-    False -> #(heap, Ok(JsString("")))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let idx = helpers.get_int_arg(args, 0, 0)
+      let len = string.length(s)
+      case idx >= 0 && idx < len {
+        True -> #(state, Ok(JsString(string.slice(s, idx, 1))))
+        False -> #(state, Ok(JsString("")))
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -122,23 +104,27 @@ pub fn string_char_at(
 pub fn string_char_code_at(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let idx = get_int_arg(args, 0, 0)
-  let len = string.length(s)
-  case idx >= 0 && idx < len {
-    True -> {
-      let ch = string.slice(s, idx, 1)
-      case string.to_utf_codepoints(ch) {
-        [cp, ..] -> {
-          let code = string.utf_codepoint_to_int(cp)
-          #(heap, Ok(JsNumber(Finite(int.to_float(code)))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let idx = helpers.get_int_arg(args, 0, 0)
+      let len = string.length(s)
+      case idx >= 0 && idx < len {
+        True -> {
+          let ch = string.slice(s, idx, 1)
+          case string.to_utf_codepoints(ch) {
+            [cp, ..] -> {
+              let code = string.utf_codepoint_to_int(cp)
+              #(state, Ok(JsNumber(Finite(int.to_float(code)))))
+            }
+            [] -> #(state, Ok(JsNumber(NaN)))
+          }
         }
-        [] -> #(heap, Ok(JsNumber(NaN)))
+        False -> #(state, Ok(JsNumber(NaN)))
       }
     }
-    False -> #(heap, Ok(JsNumber(NaN)))
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -146,138 +132,167 @@ pub fn string_char_code_at(
 pub fn string_index_of(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let search = case args {
-    [v, ..] -> value.to_js_string(v)
-    [] -> "undefined"
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      use search, state <- frame.try_to_string(state, search_val)
+      let from = helpers.get_int_arg(args, 1, 0)
+      let result = index_of_from(s, search, from)
+      #(state, Ok(JsNumber(Finite(int.to_float(result)))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  let from = get_int_arg_or(args, 1, 0)
-  let result = index_of_from(s, search, from)
-  #(heap, Ok(JsNumber(Finite(int.to_float(result)))))
 }
 
 /// String.prototype.lastIndexOf(searchString, position?)
 pub fn string_last_index_of(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let search = case args {
-    [v, ..] -> value.to_js_string(v)
-    [] -> "undefined"
-  }
-  let len = string.length(s)
-  let from = case args {
-    [_, pos_val, ..] ->
-      case to_number_int(pos_val) {
-        Ok(n) -> int.min(n, len)
-        Error(_) -> len
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
       }
-    _ -> len
+      use search, state <- frame.try_to_string(state, search_val)
+      let len = string.length(s)
+      let from = case args {
+        [_, pos_val, ..] ->
+          case helpers.to_number_int(pos_val) {
+            Ok(n) -> int.min(n, len)
+            Error(_) -> len
+          }
+        _ -> len
+      }
+      let result = last_index_of_from(s, search, from)
+      #(state, Ok(JsNumber(Finite(int.to_float(result)))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  let result = last_index_of_from(s, search, from)
-  #(heap, Ok(JsNumber(Finite(int.to_float(result)))))
 }
 
 /// String.prototype.includes(searchString, position?)
 pub fn string_includes(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let search = case args {
-    [v, ..] -> value.to_js_string(v)
-    [] -> "undefined"
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      use search, state <- frame.try_to_string(state, search_val)
+      let from = helpers.get_int_arg(args, 1, 0)
+      let sub = string.drop_start(s, from)
+      #(state, Ok(value.JsBool(string.contains(sub, search))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  let from = get_int_arg_or(args, 1, 0)
-  let sub = string.drop_start(s, from)
-  #(heap, Ok(value.JsBool(string.contains(sub, search))))
 }
 
 /// String.prototype.startsWith(searchString, position?)
 pub fn string_starts_with(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let search = case args {
-    [v, ..] -> value.to_js_string(v)
-    [] -> "undefined"
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
+      }
+      use search, state <- frame.try_to_string(state, search_val)
+      let from = helpers.get_int_arg(args, 1, 0)
+      let sub = string.drop_start(s, from)
+      #(state, Ok(value.JsBool(string.starts_with(sub, search))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  let from = get_int_arg_or(args, 1, 0)
-  let sub = string.drop_start(s, from)
-  #(heap, Ok(value.JsBool(string.starts_with(sub, search))))
 }
 
 /// String.prototype.endsWith(searchString, endPosition?)
 pub fn string_ends_with(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let search = case args {
-    [v, ..] -> value.to_js_string(v)
-    [] -> "undefined"
-  }
-  let len = string.length(s)
-  let end_pos = case args {
-    [_, pos_val, ..] ->
-      case pos_val {
-        JsUndefined -> len
-        _ ->
-          case to_number_int(pos_val) {
-            Ok(n) -> int.clamp(n, 0, len)
-            Error(_) -> len
-          }
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let search_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
       }
-    _ -> len
+      use search, state <- frame.try_to_string(state, search_val)
+      let len = string.length(s)
+      let end_pos = case args {
+        [_, pos_val, ..] ->
+          case pos_val {
+            JsUndefined -> len
+            _ ->
+              case helpers.to_number_int(pos_val) {
+                Ok(n) -> int.clamp(n, 0, len)
+                Error(_) -> len
+              }
+          }
+        _ -> len
+      }
+      let sub = string.slice(s, 0, end_pos)
+      #(state, Ok(value.JsBool(string.ends_with(sub, search))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  let sub = string.slice(s, 0, end_pos)
-  #(heap, Ok(value.JsBool(string.ends_with(sub, search))))
 }
 
 /// String.prototype.slice(start, end?)
 pub fn string_slice(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let len = string.length(s)
-  let start = case args {
-    [v, ..] ->
-      case to_number_int(v) {
-        Ok(n) ->
-          case n < 0 {
-            True -> int.max(len + n, 0)
-            False -> int.min(n, len)
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let len = string.length(s)
+      let start = case args {
+        [v, ..] ->
+          case helpers.to_number_int(v) {
+            Ok(n) ->
+              case n < 0 {
+                True -> int.max(len + n, 0)
+                False -> int.min(n, len)
+              }
+            Error(_) -> 0
           }
-        Error(_) -> 0
+        [] -> 0
       }
-    [] -> 0
-  }
-  let end = case args {
-    [_, JsUndefined, ..] -> len
-    [_, v, ..] ->
-      case to_number_int(v) {
-        Ok(n) ->
-          case n < 0 {
-            True -> int.max(len + n, 0)
-            False -> int.min(n, len)
+      let end = case args {
+        [_, JsUndefined, ..] -> len
+        [_, v, ..] ->
+          case helpers.to_number_int(v) {
+            Ok(n) ->
+              case n < 0 {
+                True -> int.max(len + n, 0)
+                False -> int.min(n, len)
+              }
+            Error(_) -> 0
           }
-        Error(_) -> 0
+        _ -> len
       }
-    _ -> len
-  }
-  case end > start {
-    True -> #(heap, Ok(JsString(string.slice(s, start, end - start))))
-    False -> #(heap, Ok(JsString("")))
+      case end > start {
+        True -> #(state, Ok(JsString(string.slice(s, start, end - start))))
+        False -> #(state, Ok(JsString("")))
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -285,142 +300,128 @@ pub fn string_slice(
 pub fn string_substring(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let len = string.length(s)
-  let raw_start = case args {
-    [v, ..] ->
-      case to_number_int(v) {
-        Ok(n) -> n
-        Error(_) -> 0
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let len = string.length(s)
+      let raw_start = case args {
+        [v, ..] ->
+          case helpers.to_number_int(v) {
+            Ok(n) -> n
+            Error(_) -> 0
+          }
+        [] -> 0
       }
-    [] -> 0
-  }
-  let raw_end = case args {
-    [_, JsUndefined, ..] -> len
-    [_, v, ..] ->
-      case to_number_int(v) {
-        Ok(n) -> n
-        Error(_) -> 0
+      let raw_end = case args {
+        [_, JsUndefined, ..] -> len
+        [_, v, ..] ->
+          case helpers.to_number_int(v) {
+            Ok(n) -> n
+            Error(_) -> 0
+          }
+        _ -> len
       }
-    _ -> len
+      // Clamp to [0, len], then swap if start > end
+      let start = int.clamp(raw_start, 0, len)
+      let end = int.clamp(raw_end, 0, len)
+      let #(start, end) = case start > end {
+        True -> #(end, start)
+        False -> #(start, end)
+      }
+      #(state, Ok(JsString(string.slice(s, start, end - start))))
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  // Clamp to [0, len], then swap if start > end
-  let start = int.clamp(raw_start, 0, len)
-  let end = int.clamp(raw_end, 0, len)
-  let #(start, end) = case start > end {
-    True -> #(end, start)
-    False -> #(start, end)
-  }
-  #(heap, Ok(JsString(string.slice(s, start, end - start))))
 }
 
 /// String.prototype.toLowerCase()
 pub fn string_to_lower_case(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  #(heap, Ok(JsString(string.lowercase(s))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, string.lowercase)
 }
 
 /// String.prototype.toUpperCase()
 pub fn string_to_upper_case(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  #(heap, Ok(JsString(string.uppercase(s))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, string.uppercase)
 }
 
 /// String.prototype.trim()
 pub fn string_trim(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  #(heap, Ok(JsString(string.trim(s))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, string.trim)
 }
 
 /// String.prototype.trimStart()
 pub fn string_trim_start(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  #(heap, Ok(JsString(string.trim_start(s))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, string.trim_start)
 }
 
 /// String.prototype.trimEnd()
 pub fn string_trim_end(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  #(heap, Ok(JsString(string.trim_end(s))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, string.trim_end)
 }
 
 /// String.prototype.split(separator, limit?)
 pub fn string_split(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
+  state: State,
   array_proto: Ref,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  case args {
-    [JsUndefined, ..] | [] -> {
-      // No separator: return [this_string]
-      let #(heap, ref) =
-        heap.alloc(
-          heap,
-          ObjectSlot(
-            kind: ArrayObject(1),
-            properties: dict.new(),
-            elements: dict.from_list([#(0, JsString(s))]),
-            prototype: Some(array_proto),
-          ),
-        )
-      #(heap, Ok(JsObject(ref)))
-    }
-    [sep_val, ..] -> {
-      let sep = value.to_js_string(sep_val)
-      let parts = case sep {
-        "" -> string.to_graphemes(s) |> list.map(JsString)
-        _ -> string.split(s, sep) |> list.map(JsString)
-      }
-      // Apply limit if provided
-      let parts = case args {
-        [_, limit_val, ..] ->
-          case to_number_int(limit_val) {
-            Ok(limit) -> list.take(parts, limit)
-            Error(_) -> parts
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      case args {
+        [JsUndefined, ..] | [] -> {
+          // No separator: return [this_string]
+          let #(heap, ref) =
+            common.alloc_array(state.heap, [JsString(s)], array_proto)
+          #(State(..state, heap:), Ok(JsObject(ref)))
+        }
+        [sep_val, ..] -> {
+          case frame.to_string(state, sep_val) {
+            Ok(#(sep, state)) -> {
+              let heap = state.heap
+              let parts = case sep {
+                "" -> string.to_graphemes(s) |> list.map(JsString)
+                _ -> string.split(s, sep) |> list.map(JsString)
+              }
+              // Apply limit if provided
+              let parts = case args {
+                [_, limit_val, ..] ->
+                  case helpers.to_number_int(limit_val) {
+                    Ok(limit) -> list.take(parts, limit)
+                    Error(_) -> parts
+                  }
+                _ -> parts
+              }
+              let #(heap, ref) = common.alloc_array(heap, parts, array_proto)
+              #(State(..state, heap:), Ok(JsObject(ref)))
+            }
+            Error(#(thrown, state)) -> #(state, Error(thrown))
           }
-        _ -> parts
+        }
       }
-      let count = list.length(parts)
-      let elems =
-        parts
-        |> list.index_map(fn(val, idx) { #(idx, val) })
-        |> dict.from_list()
-      let #(heap, ref) =
-        heap.alloc(
-          heap,
-          ObjectSlot(
-            kind: ArrayObject(count),
-            properties: dict.new(),
-            elements: elems,
-            prototype: Some(array_proto),
-          ),
-        )
-      #(heap, Ok(JsObject(ref)))
     }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -428,43 +429,62 @@ pub fn string_split(
 pub fn string_concat(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let result =
-    list.fold(args, s, fn(acc, arg) { acc <> value.to_js_string(arg) })
-  #(heap, Ok(JsString(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> concat_loop(args, s, state)
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+  }
+}
+
+fn concat_loop(
+  args: List(JsValue),
+  acc: String,
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case args {
+    [] -> #(state, Ok(JsString(acc)))
+    [arg, ..rest] ->
+      case frame.to_string(state, arg) {
+        Ok(#(s, state)) -> concat_loop(rest, acc <> s, state)
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
+  }
 }
 
 /// String.prototype.toString()
 pub fn string_to_string(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  #(heap, Ok(JsString(coerce_to_string(this))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, fn(s) { s })
 }
 
 /// String.prototype.valueOf()
 pub fn string_value_of(
   this: JsValue,
   _args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  #(heap, Ok(JsString(coerce_to_string(this))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_transform(this, state, fn(s) { s })
 }
 
 /// String.prototype.repeat(count)
 pub fn string_repeat(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let count = get_int_arg(args, 0, 0)
-  case count < 0 {
-    True -> #(heap, Ok(JsString("")))
-    False -> #(heap, Ok(JsString(string.repeat(s, count))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let count = helpers.get_int_arg(args, 0, 0)
+      case count < 0 {
+        True -> #(state, Ok(JsString("")))
+        False -> #(state, Ok(JsString(string.repeat(s, count))))
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -472,56 +492,65 @@ pub fn string_repeat(
 pub fn string_pad_start(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let target_len = get_int_arg(args, 0, 0)
-  let pad = case args {
-    [_, v, ..] ->
-      case v {
-        JsUndefined -> " "
-        _ -> value.to_js_string(v)
-      }
-    _ -> " "
-  }
-  #(heap, Ok(JsString(string.pad_start(s, target_len, pad))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_pad(this, args, state, string.pad_start)
 }
 
 /// String.prototype.padEnd(targetLength, padString?)
 pub fn string_pad_end(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let target_len = get_int_arg(args, 0, 0)
-  let pad = case args {
-    [_, v, ..] ->
-      case v {
-        JsUndefined -> " "
-        _ -> value.to_js_string(v)
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  string_pad(this, args, state, string.pad_end)
+}
+
+fn string_pad(
+  this: JsValue,
+  args: List(JsValue),
+  state: State,
+  pad_fn: fn(String, Int, String) -> String,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let target_len = helpers.get_int_arg(args, 0, 0)
+      case args {
+        [_, v, ..] ->
+          case v {
+            JsUndefined -> #(state, Ok(JsString(pad_fn(s, target_len, " "))))
+            _ -> {
+              use pad, state <- frame.try_to_string(state, v)
+              #(state, Ok(JsString(pad_fn(s, target_len, pad))))
+            }
+          }
+        _ -> #(state, Ok(JsString(pad_fn(s, target_len, " "))))
       }
-    _ -> " "
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
-  #(heap, Ok(JsString(string.pad_end(s, target_len, pad))))
 }
 
 /// String.prototype.at(index) — relative indexing
 pub fn string_at(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let s = coerce_to_string(this)
-  let idx = get_int_arg(args, 0, 0)
-  let len = string.length(s)
-  let actual_idx = case idx < 0 {
-    True -> len + idx
-    False -> idx
-  }
-  case actual_idx >= 0 && actual_idx < len {
-    True -> #(heap, Ok(JsString(string.slice(s, actual_idx, 1))))
-    False -> #(heap, Ok(JsUndefined))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> {
+      let idx = helpers.get_int_arg(args, 0, 0)
+      let len = string.length(s)
+      let actual_idx = case idx < 0 {
+        True -> len + idx
+        False -> idx
+      }
+      case actual_idx >= 0 && actual_idx < len {
+        True -> #(state, Ok(JsString(string.slice(s, actual_idx, 1))))
+        False -> #(state, Ok(JsUndefined))
+      }
+    }
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -530,65 +559,25 @@ pub fn string_at(
 // ============================================================================
 
 /// Extract the string value from `this`. Primitive strings are the common case.
-fn coerce_to_string(this: JsValue) -> String {
+fn coerce_to_string(
+  this: JsValue,
+  state: State,
+) -> Result(#(String, State), #(JsValue, State)) {
   case this {
-    JsString(s) -> s
-    _ -> value.to_js_string(this)
+    JsString(s) -> Ok(#(s, state))
+    _ -> frame.to_string(state, this)
   }
 }
 
-/// Get an integer argument at position `idx` with a default value.
-fn get_int_arg(args: List(JsValue), idx: Int, default: Int) -> Int {
-  case list_at(args, idx) {
-    Some(v) ->
-      case to_number_int(v) {
-        Ok(n) -> n
-        Error(_) -> default
-      }
-    None -> default
-  }
-}
-
-/// Get an integer from arg at position `idx` with fallback.
-/// Unlike get_int_arg, this checks if the arg exists and returns default only if missing.
-fn get_int_arg_or(args: List(JsValue), idx: Int, default: Int) -> Int {
-  get_int_arg(args, idx, default)
-}
-
-/// Convert a JsValue to an integer (truncating).
-fn to_number_int(val: JsValue) -> Result(Int, Nil) {
-  case val {
-    JsNumber(Finite(n)) -> Ok(float_to_int(n))
-    JsNumber(_) -> Error(Nil)
-    JsUndefined -> Error(Nil)
-    value.JsNull -> Ok(0)
-    value.JsBool(True) -> Ok(1)
-    value.JsBool(False) -> Ok(0)
-    JsString(s) ->
-      case int.parse(s) {
-        Ok(n) -> Ok(n)
-        Error(_) ->
-          case gleam_stdlib_parse_float(s) {
-            Ok(f) -> Ok(float_to_int(f))
-            Error(_) -> Error(Nil)
-          }
-      }
-    _ -> Error(Nil)
-  }
-}
-
-fn float_to_int(f: Float) -> Int {
-  case f <. 0.0 {
-    True -> 0 - float.truncate(float.negate(f))
-    False -> float.truncate(f)
-  }
-}
-
-fn list_at(lst: List(a), idx: Int) -> option.Option(a) {
-  case idx, lst {
-    0, [x, ..] -> Some(x)
-    n, [_, ..rest] -> list_at(rest, n - 1)
-    _, [] -> None
+/// Coerce `this` to string, apply a transformation, return the result.
+fn string_transform(
+  this: JsValue,
+  state: State,
+  transform: fn(String) -> String,
+) -> #(State, Result(JsValue, JsValue)) {
+  case coerce_to_string(this, state) {
+    Ok(#(s, state)) -> #(state, Ok(JsString(transform(s))))
+    Error(#(thrown, state)) -> #(state, Error(thrown))
   }
 }
 
@@ -654,52 +643,5 @@ fn last_index_of_loop(
         True -> pos
         False -> last_index_of_loop(s, search, pos - 1, search_len)
       }
-  }
-}
-
-@external(erlang, "gleam_stdlib", "parse_float")
-fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
-
-/// Allocate a native function object on the heap, root it, and return the ref.
-fn alloc_native_fn(
-  h: Heap,
-  function_proto: Ref,
-  native: value.NativeFn,
-  name: String,
-  length: Int,
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(native),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(JsNumber(Finite(int.to_float(length)))),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Add a non-enumerable method property to an object on the heap.
-fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
   }
 }

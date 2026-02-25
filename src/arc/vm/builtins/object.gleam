@@ -1,12 +1,16 @@
-import arc/vm/builtins/common.{type BuiltinType, BuiltinType, set_constructor}
+import arc/vm/builtins/common.{type BuiltinType}
+import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
+import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type Ref, ArrayObject, DataProperty, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsUndefined, NativeFunction, NativeObjectConstructor,
+  type JsElements, type JsValue, type Ref, ArrayObject, DataProperty,
+  FunctionObject, GeneratorObject, JsBool, JsNull, JsNumber, JsObject, JsString,
+  JsSymbol, JsUndefined, NativeFunction, NativeObjectConstructor,
   NativeObjectDefineProperty, NativeObjectGetOwnPropertyDescriptor,
   NativeObjectGetOwnPropertyNames, NativeObjectKeys,
   NativeObjectPrototypeHasOwnProperty, NativeObjectPrototypePropertyIsEnumerable,
-  ObjectSlot, OrdinaryObject,
+  NativeObjectPrototypeToString, NativeObjectPrototypeValueOf, ObjectSlot,
+  OrdinaryObject, PromiseObject,
 }
 import gleam/dict
 import gleam/int
@@ -20,127 +24,30 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType) {
-  let #(h, ctor_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(NativeObjectConstructor),
-        properties: dict.from_list([
-          #("prototype", value.builtin_property(JsObject(object_proto))),
-          #("name", value.builtin_property(JsString("Object"))),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ctor_ref)
-  let h = set_constructor(h, object_proto, ctor_ref)
-
-  // Object.getOwnPropertyDescriptor — static method
-  let #(h, gopd_ref) =
-    alloc_native_fn(
-      h,
-      function_proto,
-      NativeObjectGetOwnPropertyDescriptor,
-      "getOwnPropertyDescriptor",
-      2,
-    )
-  let h = add_method(h, ctor_ref, "getOwnPropertyDescriptor", gopd_ref)
-
-  // Object.defineProperty — static method
-  let #(h, dp_ref) =
-    alloc_native_fn(
-      h,
-      function_proto,
-      NativeObjectDefineProperty,
-      "defineProperty",
-      3,
-    )
-  let h = add_method(h, ctor_ref, "defineProperty", dp_ref)
-
-  // Object.getOwnPropertyNames — static method
-  let #(h, gopn_ref) =
-    alloc_native_fn(
-      h,
-      function_proto,
-      NativeObjectGetOwnPropertyNames,
-      "getOwnPropertyNames",
-      1,
-    )
-  let h = add_method(h, ctor_ref, "getOwnPropertyNames", gopn_ref)
-
-  // Object.keys — static method
-  let #(h, keys_ref) =
-    alloc_native_fn(h, function_proto, NativeObjectKeys, "keys", 1)
-  let h = add_method(h, ctor_ref, "keys", keys_ref)
-
-  // Object.prototype.hasOwnProperty — instance method on prototype
-  let #(h, hop_ref) =
-    alloc_native_fn(
-      h,
-      function_proto,
-      NativeObjectPrototypeHasOwnProperty,
-      "hasOwnProperty",
-      1,
-    )
-  let h = add_method(h, object_proto, "hasOwnProperty", hop_ref)
-
-  // Object.prototype.propertyIsEnumerable — instance method on prototype
-  let #(h, pie_ref) =
-    alloc_native_fn(
-      h,
-      function_proto,
-      NativeObjectPrototypePropertyIsEnumerable,
-      "propertyIsEnumerable",
-      1,
-    )
-  let h = add_method(h, object_proto, "propertyIsEnumerable", pie_ref)
-
-  #(h, BuiltinType(prototype: object_proto, constructor: ctor_ref))
-}
-
-/// Allocate a native function object on the heap, root it, and return the ref.
-fn alloc_native_fn(
-  h: Heap,
-  function_proto: Ref,
-  native: value.NativeFn,
-  name: String,
-  length: Int,
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(native),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(JsNumber(value.Finite(int.to_float(length)))),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Add a non-enumerable method property to an object on the heap.
-fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
-  }
+  let #(h, static_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("getOwnPropertyDescriptor", NativeObjectGetOwnPropertyDescriptor, 2),
+      #("defineProperty", NativeObjectDefineProperty, 3),
+      #("getOwnPropertyNames", NativeObjectGetOwnPropertyNames, 1),
+      #("keys", NativeObjectKeys, 1),
+    ])
+  let #(h, proto_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("hasOwnProperty", NativeObjectPrototypeHasOwnProperty, 1),
+      #("propertyIsEnumerable", NativeObjectPrototypePropertyIsEnumerable, 1),
+      #("toString", NativeObjectPrototypeToString, 0),
+      #("valueOf", NativeObjectPrototypeValueOf, 0),
+    ])
+  common.init_type_on(
+    h,
+    object_proto,
+    function_proto,
+    proto_methods,
+    fn(_) { NativeObjectConstructor },
+    "Object",
+    1,
+    static_methods,
+  )
 }
 
 /// Object() / new Object() — creates a plain empty object,
@@ -148,11 +55,12 @@ fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
 pub fn call_native(
   args: List(JsValue),
   _this: JsValue,
-  heap: Heap,
+  state: State,
   object_proto: Ref,
-) -> #(Heap, Result(JsValue, JsValue)) {
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
   case args {
-    [JsObject(_) as obj, ..] -> #(heap, Ok(obj))
+    [JsObject(_) as obj, ..] -> #(state, Ok(obj))
     _ -> {
       let #(heap, ref) =
         heap.alloc(
@@ -160,11 +68,12 @@ pub fn call_native(
           ObjectSlot(
             kind: OrdinaryObject,
             properties: dict.new(),
-            elements: dict.new(),
+            symbol_properties: dict.new(),
+            elements: js_elements.new(),
             prototype: Some(object_proto),
           ),
         )
-      #(heap, Ok(JsObject(ref)))
+      #(State(..state, heap:), Ok(JsObject(ref)))
     }
   }
 }
@@ -173,33 +82,39 @@ pub fn call_native(
 /// Returns a descriptor object {value, writable, enumerable, configurable} or undefined.
 pub fn get_own_property_descriptor(
   args: List(JsValue),
-  heap: Heap,
+  state: State,
   object_proto: Ref,
-) -> #(Heap, Result(JsValue, JsValue)) {
+) -> #(State, Result(JsValue, JsValue)) {
   case args {
     [JsObject(ref), key_val, ..] -> {
-      let key_str = value.to_js_string(key_val)
-      case get_own_property(heap, ref, key_str) {
-        Ok(prop) -> {
-          let #(heap, desc_ref) =
-            make_descriptor_object(heap, prop, object_proto)
-          #(heap, Ok(JsObject(desc_ref)))
+      case frame.to_string(state, key_val) {
+        Ok(#(key_str, state)) -> {
+          let heap = state.heap
+          case get_own_property(heap, ref, key_str) {
+            Ok(prop) -> {
+              let #(heap, desc_ref) =
+                make_descriptor_object(heap, prop, object_proto)
+              #(State(..state, heap:), Ok(JsObject(desc_ref)))
+            }
+            Error(_) -> #(state, Ok(JsUndefined))
+          }
         }
-        Error(_) -> #(heap, Ok(JsUndefined))
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
     }
     [JsObject(ref)] -> {
       // Missing key arg — key is undefined, convert to string "undefined"
+      let heap = state.heap
       case get_own_property(heap, ref, "undefined") {
         Ok(prop) -> {
           let #(heap, desc_ref) =
             make_descriptor_object(heap, prop, object_proto)
-          #(heap, Ok(JsObject(desc_ref)))
+          #(State(..state, heap:), Ok(JsObject(desc_ref)))
         }
-        Error(_) -> #(heap, Ok(JsUndefined))
+        Error(_) -> #(state, Ok(JsUndefined))
       }
     }
-    _ -> #(heap, Ok(JsUndefined))
+    _ -> #(state, Ok(JsUndefined))
   }
 }
 
@@ -225,15 +140,15 @@ fn get_own_property(
             _ ->
               case int.parse(key) {
                 Ok(idx) ->
-                  case dict.get(elements, idx) {
-                    Ok(val) ->
+                  case js_elements.get_option(elements, idx) {
+                    option.Some(val) ->
                       Ok(DataProperty(
                         value: val,
                         writable: True,
                         enumerable: True,
                         configurable: True,
                       ))
-                    Error(_) -> Error(Nil)
+                    option.None -> Error(Nil)
                   }
                 Error(_) -> dict.get(properties, key)
               }
@@ -262,7 +177,8 @@ fn make_descriptor_object(
             #("enumerable", value.data_property(JsBool(enumerable))),
             #("configurable", value.data_property(JsBool(configurable))),
           ]),
-          elements: dict.new(),
+          symbol_properties: dict.new(),
+          elements: js_elements.new(),
           prototype: Some(object_proto),
         ),
       )
@@ -274,19 +190,23 @@ fn make_descriptor_object(
 /// Returns the target object.
 pub fn define_property(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case args {
     [JsObject(ref) as obj, key_val, JsObject(desc_ref), ..] -> {
-      let key_str = value.to_js_string(key_val)
-      let heap = apply_descriptor(heap, ref, key_str, desc_ref)
-      #(heap, Ok(obj))
+      case frame.to_string(state, key_val) {
+        Ok(#(key_str, state)) -> {
+          let heap = apply_descriptor(state.heap, ref, key_str, desc_ref)
+          #(State(..state, heap:), Ok(obj))
+        }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
+      }
     }
     [JsObject(_) as obj, _, _, ..] ->
       // descriptor is not an object — per spec should throw TypeError
       // but many engines are lenient; we'll just return obj unchanged
-      #(heap, Ok(obj))
-    _ -> #(heap, Ok(JsUndefined))
+      #(state, Ok(obj))
+    _ -> #(state, Ok(JsUndefined))
   }
 }
 
@@ -304,7 +224,7 @@ fn apply_descriptor(
   let desc_configurable = read_desc_bool(heap, desc_ref, "configurable")
 
   case heap.read(heap, target_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
+    Ok(ObjectSlot(kind:, properties:, symbol_properties:, elements:, prototype:)) -> {
       // Get existing property to merge with
       let existing = dict.get(properties, key)
 
@@ -352,7 +272,13 @@ fn apply_descriptor(
       heap.write(
         heap,
         target_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
+        ObjectSlot(
+          kind:,
+          properties: new_props,
+          symbol_properties:,
+          elements:,
+          prototype:,
+        ),
       )
     }
     _ -> heap
@@ -393,32 +319,36 @@ fn read_desc_bool(heap: Heap, desc_ref: Ref, key: String) -> option.Option(Bool)
 /// (both enumerable and non-enumerable).
 pub fn get_own_property_names(
   args: List(JsValue),
-  heap: Heap,
+  state: State,
   array_proto: Ref,
-) -> #(Heap, Result(JsValue, JsValue)) {
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
   case args {
     [JsObject(ref), ..] -> {
       let keys = collect_own_keys(heap, ref, False)
-      let #(heap, arr_ref) = make_string_array(heap, keys, array_proto)
-      #(heap, Ok(JsObject(arr_ref)))
+      let #(heap, arr_ref) =
+        common.alloc_array(heap, list.map(keys, JsString), array_proto)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
     }
-    _ -> #(heap, Ok(JsUndefined))
+    _ -> #(state, Ok(JsUndefined))
   }
 }
 
 /// Object.keys(obj) — returns array of enumerable own string keys.
 pub fn keys(
   args: List(JsValue),
-  heap: Heap,
+  state: State,
   array_proto: Ref,
-) -> #(Heap, Result(JsValue, JsValue)) {
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
   case args {
     [JsObject(ref), ..] -> {
       let ks = collect_own_keys(heap, ref, True)
-      let #(heap, arr_ref) = make_string_array(heap, ks, array_proto)
-      #(heap, Ok(JsObject(arr_ref)))
+      let #(heap, arr_ref) =
+        common.alloc_array(heap, list.map(ks, JsString), array_proto)
+      #(State(..state, heap:), Ok(JsObject(arr_ref)))
     }
-    _ -> #(heap, Ok(JsUndefined))
+    _ -> #(state, Ok(JsUndefined))
   }
 }
 
@@ -463,7 +393,7 @@ fn collect_own_keys(heap: Heap, ref: Ref, enumerable_only: Bool) -> List(String)
 
 /// Collect string representations of array indices that exist in elements.
 fn collect_index_keys(
-  elements: dict.Dict(Int, JsValue),
+  elements: JsElements,
   idx: Int,
   length: Int,
   acc: List(String),
@@ -471,7 +401,7 @@ fn collect_index_keys(
   case idx >= length {
     True -> list.reverse(acc)
     False ->
-      case dict.has_key(elements, idx) {
+      case js_elements.has(elements, idx) {
         True ->
           collect_index_keys(elements, idx + 1, length, [
             int.to_string(idx),
@@ -482,48 +412,32 @@ fn collect_index_keys(
   }
 }
 
-/// Allocate a JS array from a list of strings.
-fn make_string_array(
-  heap: Heap,
-  keys: List(String),
-  array_proto: Ref,
-) -> #(Heap, Ref) {
-  let count = list.length(keys)
-  let elems =
-    keys
-    |> list.index_map(fn(key, idx) { #(idx, JsString(key)) })
-    |> dict.from_list()
-  heap.alloc(
-    heap,
-    ObjectSlot(
-      kind: ArrayObject(count),
-      properties: dict.new(),
-      elements: elems,
-      prototype: Some(array_proto),
-    ),
-  )
-}
-
 /// Object.prototype.hasOwnProperty(key)
 /// Checks if the object has an own property with the given key (NOT prototype chain).
 pub fn has_own_property(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) -> {
-      let key_str = case args {
-        [key_val, ..] -> value.to_js_string(key_val)
-        [] -> "undefined"
+      let key_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
       }
-      let result = case get_own_property(heap, ref, key_str) {
-        Ok(_) -> JsBool(True)
-        Error(_) -> JsBool(False)
+      case frame.to_string(state, key_val) {
+        Ok(#(key_str, state)) -> {
+          let heap = state.heap
+          let result = case get_own_property(heap, ref, key_str) {
+            Ok(_) -> JsBool(True)
+            Error(_) -> JsBool(False)
+          }
+          #(state, Ok(result))
+        }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
-      #(heap, Ok(result))
     }
-    _ -> #(heap, Ok(JsBool(False)))
+    _ -> #(state, Ok(JsBool(False)))
   }
 }
 
@@ -532,20 +446,82 @@ pub fn has_own_property(
 pub fn property_is_enumerable(
   this: JsValue,
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case this {
     JsObject(ref) -> {
-      let key_str = case args {
-        [key_val, ..] -> value.to_js_string(key_val)
-        [] -> "undefined"
+      let key_val = case args {
+        [v, ..] -> v
+        [] -> JsUndefined
       }
-      let result = case get_own_property(heap, ref, key_str) {
-        Ok(DataProperty(enumerable: True, ..)) -> JsBool(True)
-        _ -> JsBool(False)
+      case frame.to_string(state, key_val) {
+        Ok(#(key_str, state)) -> {
+          let heap = state.heap
+          let result = case get_own_property(heap, ref, key_str) {
+            Ok(DataProperty(enumerable: True, ..)) -> JsBool(True)
+            _ -> JsBool(False)
+          }
+          #(state, Ok(result))
+        }
+        Error(#(thrown, state)) -> #(state, Error(thrown))
       }
-      #(heap, Ok(result))
     }
-    _ -> #(heap, Ok(JsBool(False)))
+    _ -> #(state, Ok(JsBool(False)))
   }
+}
+
+/// Object.prototype.toString() — ES2024 ss19.1.3.6
+/// Returns "[object Tag]" where Tag is determined by:
+/// 1. null -> "Null", undefined -> "Undefined"
+/// 2. Primitives -> their type name
+/// 3. Objects: check Symbol.toStringTag, then classify by kind
+pub fn object_to_string(
+  this: JsValue,
+  _args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let heap = state.heap
+  let tag = case this {
+    JsNull -> "Null"
+    JsUndefined -> "Undefined"
+    JsBool(_) -> "Boolean"
+    JsNumber(_) -> "Number"
+    JsString(_) -> "String"
+    JsSymbol(_) -> "Symbol"
+    value.JsBigInt(_) -> "BigInt"
+    JsObject(ref) -> object_tag(heap, ref)
+    value.JsUninitialized -> "Undefined"
+  }
+  #(state, Ok(JsString("[object " <> tag <> "]")))
+}
+
+/// Determine the [[Class]] / toStringTag for an object ref.
+fn object_tag(heap: Heap, ref: Ref) -> String {
+  case heap.read(heap, ref) {
+    Ok(ObjectSlot(kind:, symbol_properties:, ..)) ->
+      // First check Symbol.toStringTag
+      case dict.get(symbol_properties, value.symbol_to_string_tag) {
+        Ok(DataProperty(value: JsString(tag), ..)) -> tag
+        _ ->
+          // Classify by kind
+          case kind {
+            ArrayObject(_) -> "Array"
+            FunctionObject(..) | NativeFunction(_) -> "Function"
+            PromiseObject(_) -> "Promise"
+            GeneratorObject(_) -> "Generator"
+            OrdinaryObject -> "Object"
+          }
+      }
+    _ -> "Object"
+  }
+}
+
+/// Object.prototype.valueOf() — ES2024 ss19.1.3.7
+/// Returns `this` unchanged.
+pub fn object_value_of(
+  this: JsValue,
+  _args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  #(state, Ok(this))
 }

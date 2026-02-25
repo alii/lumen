@@ -1,3 +1,4 @@
+import arc/vm/array
 import arc/vm/builtins
 import arc/vm/heap
 import arc/vm/object
@@ -13,6 +14,7 @@ import arc/vm/value.{
 }
 import arc/vm/vm
 import gleam/option.{None}
+import gleam/result
 
 fn make_func(
   bytecode: List(Op),
@@ -23,9 +25,9 @@ fn make_func(
     name: None,
     arity: 0,
     local_count:,
-    bytecode:,
-    constants:,
-    functions: [],
+    bytecode: array.from_list(bytecode),
+    constants: array.from_list(constants),
+    functions: array.from_list([]),
     env_descriptors: [],
     is_strict: False,
     is_arrow: False,
@@ -44,9 +46,9 @@ fn run_simple(
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   case vm.run(func, h, b) {
-    Ok(vm.NormalCompletion(val, _heap)) -> Ok(val)
-    Ok(vm.ThrowCompletion(_, _)) -> panic as "unexpected ThrowCompletion"
-    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(#(vm.NormalCompletion(val, _heap), _state)) -> Ok(val)
+    Ok(#(vm.ThrowCompletion(_, _), _)) -> panic as "unexpected ThrowCompletion"
+    Ok(#(vm.YieldCompletion(_, _), _)) -> panic as "unexpected YieldCompletion"
     Error(e) -> Error(e)
   }
 }
@@ -60,10 +62,10 @@ fn run_throwing(
   let h = heap.new()
   let #(h, b) = builtins.init(h)
   case vm.run(func, h, b) {
-    Ok(vm.ThrowCompletion(val, _heap)) -> Ok(val)
-    Ok(vm.NormalCompletion(_, _)) ->
+    Ok(#(vm.ThrowCompletion(val, _heap), _state)) -> Ok(val)
+    Ok(#(vm.NormalCompletion(_, _), _)) ->
       panic as "expected ThrowCompletion, got NormalCompletion"
-    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Ok(#(vm.YieldCompletion(_, _), _)) -> panic as "unexpected YieldCompletion"
     Error(e) -> Error(e)
   }
 }
@@ -72,7 +74,8 @@ fn run_throwing(
 fn run_func(func: FuncTemplate) -> Result(vm.Completion, vm.VmError) {
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  vm.run(func, h, b)
+  use #(completion, _state) <- result.map(vm.run(func, h, b))
+  completion
 }
 
 // ============================================================================
@@ -637,7 +640,8 @@ pub fn tdz_throws_reference_error_test() {
     )
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) = vm.run(func, h, b)
+  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
+    vm.run(func, h, b)
   // Check it's a ReferenceError via prototype chain
   let assert Ok(JsString("ReferenceError")) =
     object.get_property(heap, ref, "name")
@@ -653,7 +657,8 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
     )
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) = vm.run(func, h, b)
+  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
+    vm.run(func, h, b)
   let assert Ok(JsString("TypeError")) = object.get_property(heap, ref, "name")
 }
 
@@ -704,7 +709,8 @@ pub fn get_field_on_null_throws_type_error_test() {
   let func = make_func([PushConst(0), GetField("x")], [JsNull], 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) = vm.run(func, h, b)
+  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
+    vm.run(func, h, b)
   let assert Ok(JsString("TypeError")) = object.get_property(heap, ref, "name")
 }
 
@@ -713,7 +719,8 @@ pub fn get_field_on_undefined_throws_type_error_test() {
   let func = make_func([PushConst(0), GetField("x")], [JsUndefined], 0)
   let h = heap.new()
   let #(h, b) = builtins.init(h)
-  let assert Ok(vm.ThrowCompletion(JsObject(ref), heap)) = vm.run(func, h, b)
+  let assert Ok(#(vm.ThrowCompletion(JsObject(ref), heap), _state)) =
+    vm.run(func, h, b)
   let assert Ok(JsString("TypeError")) = object.get_property(heap, ref, "name")
 }
 

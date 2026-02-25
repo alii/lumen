@@ -1,14 +1,19 @@
-import arc/vm/builtins.{type Builtins}
+import arc/vm/array
 import arc/vm/builtins/array as builtins_array
 import arc/vm/builtins/boolean as builtins_boolean
+import arc/vm/builtins/common.{type Builtins}
 import arc/vm/builtins/error as builtins_error
 import arc/vm/builtins/math as builtins_math
 import arc/vm/builtins/number as builtins_number
 import arc/vm/builtins/object as builtins_object
 import arc/vm/builtins/promise as builtins_promise
 import arc/vm/builtins/string as builtins_string
-import arc/vm/frame.{type FinallyCompletion, type TryFrame, TryFrame}
+import arc/vm/builtins/symbol as builtins_symbol
+import arc/vm/frame.{
+  type FinallyCompletion, type State, type TryFrame, SavedFrame, State, TryFrame,
+}
 import arc/vm/heap.{type Heap}
+import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/opcode.{
   type BinOpKind, type FuncTemplate, type Op, type UnaryOpKind, Add, ArrayFrom,
@@ -25,10 +30,10 @@ import arc/vm/opcode.{
 }
 import arc/vm/value.{
   type JsNum, type JsValue, type Ref, ArrayIteratorSlot, ArrayObject,
-  AsyncFunctionSlot, DataProperty, Finite, ForInIteratorSlot, FunctionObject,
-  GeneratorObject, GeneratorSlot, Infinity, JsBigInt, JsBool, JsNull, JsNumber,
-  JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized, NaN,
-  NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject, PromiseObject,
+  AsyncFunctionSlot, BigInt, DataProperty, Finite, ForInIteratorSlot,
+  FunctionObject, GeneratorObject, GeneratorSlot, Infinity, JsBigInt, JsBool,
+  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, JsUninitialized,
+  NaN, NativeFunction, NegInfinity, ObjectSlot, OrdinaryObject, PromiseObject,
 }
 import gleam/dict
 import gleam/float
@@ -66,57 +71,16 @@ pub type VmError {
 }
 
 // ============================================================================
-// Internal state
+// Internal state (types defined in frame.gleam for cross-module access)
 // ============================================================================
 
-/// A saved caller frame, pushed onto call_stack when Call enters a function.
-type SavedFrame {
-  SavedFrame(
-    func: FuncTemplate,
-    locals: List(JsValue),
-    stack: List(JsValue),
-    pc: Int,
-    try_stack: List(TryFrame),
-    this_binding: JsValue,
-    /// For constructor calls: the newly created object to return if the
-    /// constructor doesn't explicitly return an object.
-    constructor_this: option.Option(JsValue),
-    /// The heap ref of the currently-executing function (needed by CallSuper
-    /// to find the parent constructor via callee_ref.__proto__).
-    callee_ref: option.Option(Ref),
-  )
-}
-
-/// Internal execution state for the VM loop.
-type State {
-  State(
-    stack: List(JsValue),
-    locals: List(JsValue),
-    constants: List(JsValue),
-    globals: dict.Dict(String, JsValue),
-    func: FuncTemplate,
-    code: List(Op),
-    heap: Heap,
-    pc: Int,
-    call_stack: List(SavedFrame),
-    try_stack: List(TryFrame),
-    finally_stack: List(FinallyCompletion),
-    builtins: Builtins,
-    /// Maps closure heap ref → FuncTemplate, populated at MakeClosure time.
-    /// This is needed because a closure's func_index is relative to its
-    /// defining parent, which may no longer be on the call stack when called.
-    closure_templates: dict.Dict(Int, FuncTemplate),
-    /// The current `this` binding. Set by CallMethod/CallConstructor,
-    /// defaults to JsUndefined for regular calls.
-    this_binding: JsValue,
-    /// The heap ref of the currently-executing function (for derived constructors).
-    callee_ref: option.Option(Ref),
-    /// Promise microtask job queue. Jobs enqueued during promise operations,
-    /// drained after script completes (or by run_and_drain).
-    job_queue: List(value.Job),
-    /// REPL: set of global names declared with `const` (PutGlobal throws TypeError).
-    const_globals: set.Set(String),
-  )
+/// The js_to_string callback that gets stored in State.
+/// Delegates to the VM's internal js_to_string implementation.
+fn js_to_string_callback(
+  state: State,
+  val: JsValue,
+) -> Result(#(String, State), #(JsValue, State)) {
+  js_to_string(state, val)
 }
 
 /// Signals from step() — either continue with new state, or stop.
@@ -137,8 +101,39 @@ pub fn run(
   func: FuncTemplate,
   heap: Heap,
   builtins: Builtins,
-) -> Result(Completion, VmError) {
+) -> Result(#(Completion, State), VmError) {
   run_with_globals(func, heap, builtins, dict.new())
+}
+
+fn init_state(
+  func: FuncTemplate,
+  heap: Heap,
+  builtins: Builtins,
+  globals: dict.Dict(String, JsValue),
+) {
+  let locals = array.repeat(JsUndefined, func.local_count)
+  State(
+    stack: [],
+    locals:,
+    constants: func.constants,
+    globals:,
+    func:,
+    code: func.bytecode,
+    heap:,
+    pc: 0,
+    call_stack: [],
+    try_stack: [],
+    finally_stack: [],
+    builtins:,
+    closure_templates: dict.new(),
+    this_binding: JsUndefined,
+    callee_ref: None,
+    job_queue: [],
+    const_globals: set.new(),
+    next_symbol_id: 100,
+    symbol_descriptions: dict.new(),
+    js_to_string: js_to_string_callback,
+  )
 }
 
 /// Run a function template with pre-populated global variables.
@@ -147,29 +142,8 @@ pub fn run_with_globals(
   heap: Heap,
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
-) -> Result(Completion, VmError) {
-  let locals = list.repeat(JsUndefined, func.local_count)
-  let state =
-    State(
-      stack: [],
-      locals:,
-      constants: func.constants,
-      globals:,
-      func:,
-      code: func.bytecode,
-      heap:,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      finally_stack: [],
-      builtins:,
-      closure_templates: dict.new(),
-      this_binding: JsUndefined,
-      callee_ref: None,
-      job_queue: [],
-      const_globals: set.new(),
-    )
-  execute(state)
+) -> Result(#(Completion, State), VmError) {
+  init_state(func, heap, builtins, globals) |> execute_inner()
 }
 
 /// Run a function template with globals, then drain the promise job queue.
@@ -180,39 +154,14 @@ pub fn run_and_drain(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
 ) -> Result(Completion, VmError) {
-  let locals = list.repeat(JsUndefined, func.local_count)
-  let state =
-    State(
-      stack: [],
-      locals:,
-      constants: func.constants,
-      globals:,
-      func:,
-      code: func.bytecode,
-      heap:,
-      pc: 0,
-      call_stack: [],
-      try_stack: [],
-      finally_stack: [],
-      builtins:,
-      closure_templates: dict.new(),
-      this_binding: JsUndefined,
-      callee_ref: None,
-      job_queue: [],
-      const_globals: set.new(),
-    )
-  case execute_inner(state) {
-    Ok(#(completion, final_state)) -> {
-      let drained_state = drain_jobs(final_state)
-      case completion {
-        NormalCompletion(val, _) ->
-          Ok(NormalCompletion(val, drained_state.heap))
-        ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
-        YieldCompletion(_, _) ->
-          panic as "YieldCompletion should not appear at script level"
-      }
-    }
-    Error(err) -> Error(err)
+  let result = init_state(func, heap, builtins, globals) |> execute_inner()
+  use #(completion, final_state) <- result.try(result)
+  let drained_state = drain_jobs(final_state)
+  case completion {
+    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
+    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
+    YieldCompletion(_, _) ->
+      panic as "YieldCompletion should not appear at script level"
   }
 }
 
@@ -222,6 +171,8 @@ pub type ReplEnv {
     globals: dict.Dict(String, JsValue),
     closure_templates: dict.Dict(Int, FuncTemplate),
     const_globals: set.Set(String),
+    next_symbol_id: Int,
+    symbol_descriptions: dict.Dict(Int, String),
   )
 }
 
@@ -233,7 +184,7 @@ pub fn run_and_drain_repl(
   builtins: Builtins,
   env: ReplEnv,
 ) -> Result(#(Completion, ReplEnv), VmError) {
-  let locals = list.repeat(JsUndefined, func.local_count)
+  let locals = array.repeat(JsUndefined, func.local_count)
   let state =
     State(
       stack: [],
@@ -253,26 +204,27 @@ pub fn run_and_drain_repl(
       callee_ref: None,
       job_queue: [],
       const_globals: env.const_globals,
+      next_symbol_id: env.next_symbol_id,
+      symbol_descriptions: env.symbol_descriptions,
+      js_to_string: js_to_string_callback,
     )
-  case execute_inner(state) {
-    Ok(#(completion, final_state)) -> {
-      let drained_state = drain_jobs(final_state)
-      let new_env =
-        ReplEnv(
-          globals: drained_state.globals,
-          closure_templates: drained_state.closure_templates,
-          const_globals: drained_state.const_globals,
-        )
-      case completion {
-        NormalCompletion(val, _) ->
-          Ok(#(NormalCompletion(val, drained_state.heap), new_env))
-        ThrowCompletion(val, _) ->
-          Ok(#(ThrowCompletion(val, drained_state.heap), new_env))
-        YieldCompletion(_, _) ->
-          panic as "YieldCompletion should not appear at script level"
-      }
-    }
-    Error(err) -> Error(err)
+  use #(completion, final_state) <- result.try(execute_inner(state))
+  let drained_state = drain_jobs(final_state)
+  let new_env =
+    ReplEnv(
+      globals: drained_state.globals,
+      closure_templates: drained_state.closure_templates,
+      const_globals: drained_state.const_globals,
+      next_symbol_id: drained_state.next_symbol_id,
+      symbol_descriptions: drained_state.symbol_descriptions,
+    )
+  case completion {
+    NormalCompletion(val, _) ->
+      Ok(#(NormalCompletion(val, drained_state.heap), new_env))
+    ThrowCompletion(val, _) ->
+      Ok(#(ThrowCompletion(val, drained_state.heap), new_env))
+    YieldCompletion(_, _) ->
+      panic as "YieldCompletion should not appear at script level"
   }
 }
 
@@ -300,15 +252,15 @@ pub fn promise_result(h: Heap, val: JsValue) -> Result(JsValue, Nil) {
 /// Main execution loop. Tail-recursive.
 /// Returns the completion and the final state (for job queue access).
 fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
-  case list_get(state.code, state.pc) {
-    Error(_) -> {
+  case array.get(state.pc, state.code) {
+    None -> {
       // Reached end of bytecode — return top of stack or undefined
       case state.stack {
         [top, ..] -> Ok(#(NormalCompletion(top, state.heap), state))
         [] -> Ok(#(NormalCompletion(JsUndefined, state.heap), state))
       }
     }
-    Ok(op) -> {
+    Some(op) -> {
       case step(state, op) {
         Ok(new_state) -> execute_inner(new_state)
         Error(#(Done, result, heap)) ->
@@ -348,13 +300,6 @@ fn execute_inner(state: State) -> Result(#(Completion, State), VmError) {
 }
 
 /// Wrapper that discards the state for backward compatibility.
-fn execute(state: State) -> Result(Completion, VmError) {
-  case execute_inner(state) {
-    Ok(#(completion, _state)) -> Ok(completion)
-    Error(err) -> Error(err)
-  }
-}
-
 /// Try to find a catch handler on the try_stack.
 /// If found: restore stack to saved depth, push thrown value, jump to catch_target.
 /// If not found: return Error(Nil) → uncaught exception.
@@ -383,6 +328,28 @@ fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
   }
 }
 
+/// Pop top of stack and jump to `target` if `condition(value)` is true,
+/// otherwise advance to next instruction.
+fn conditional_jump(
+  state: State,
+  target: Int,
+  condition: fn(JsValue) -> Bool,
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case state.stack {
+    [top, ..rest] ->
+      case condition(top) {
+        True -> Ok(State(..state, stack: rest, pc: target))
+        False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
+      }
+    [] ->
+      Error(#(
+        VmError(StackUnderflow("ConditionalJump")),
+        JsUndefined,
+        state.heap,
+      ))
+  }
+}
+
 // ============================================================================
 // Step — single instruction dispatch
 // ============================================================================
@@ -392,10 +359,10 @@ fn truncate_stack(stack: List(JsValue), depth: Int) -> List(JsValue) {
 fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
   case op {
     PushConst(index) -> {
-      case list_get(state.constants, index) {
-        Ok(value) ->
+      case array.get(index, state.constants) {
+        Some(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-        Error(_) -> {
+        None -> {
           let #(heap, err) =
             object.make_range_error(
               state.heap,
@@ -431,8 +398,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     }
 
     GetLocal(index) -> {
-      case list_get(state.locals, index) {
-        Ok(JsUninitialized) -> {
+      case array.get(index, state.locals) {
+        Some(JsUninitialized) -> {
           let #(heap, err) =
             object.make_reference_error(
               state.heap,
@@ -441,9 +408,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             )
           Error(#(Thrown, err, heap))
         }
-        Ok(value) ->
+        Some(value) ->
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-        Error(_) ->
+        None ->
           Error(#(
             VmError(LocalIndexOutOfBounds(index)),
             JsUndefined,
@@ -455,7 +422,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     PutLocal(index) -> {
       case state.stack {
         [value, ..rest] -> {
-          case list_set(state.locals, index, value) {
+          case array.set(index, value, state.locals) {
             Ok(new_locals) ->
               Ok(
                 State(
@@ -596,31 +563,93 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             opcode.In -> {
               // left = key, right = object
               case right {
-                JsObject(ref) -> {
-                  let key_str = to_js_string(left)
-                  let result = object.has_property(state.heap, ref, key_str)
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [JsBool(result), ..rest],
-                      pc: state.pc + 1,
-                    ),
-                  )
-                }
+                JsObject(ref) ->
+                  case js_to_string(state, left) {
+                    Ok(#(key_str, state)) -> {
+                      let result = object.has_property(state.heap, ref, key_str)
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [JsBool(result), ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    }
+                    Error(#(thrown, state)) ->
+                      Error(#(Thrown, thrown, state.heap))
+                  }
                 _ -> {
                   let #(heap, err) =
                     object.make_type_error(
                       state.heap,
                       state.builtins,
                       "Cannot use 'in' operator to search for '"
-                        <> to_js_string(left)
+                        <> object.inspect(left, state.heap)
                         <> "' in "
-                        <> to_js_string(right),
+                        <> object.inspect(right, state.heap),
                     )
                   Error(#(Thrown, err, heap))
                 }
               }
             }
+            // Add needs ToPrimitive for object operands (ES2024 §13.15.3)
+            Add ->
+              case left, right {
+                // Fast path: both primitives — no ToPrimitive needed
+                JsObject(_), _ | _, JsObject(_) ->
+                  binop_add_with_to_primitive(state, left, right, rest)
+                // Both primitives — fast path, no ToPrimitive needed
+                JsString(a), JsString(b) ->
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsString(a <> b), ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                JsString(a), _ ->
+                  case js_to_string(state, right) {
+                    Ok(#(b, state)) ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [JsString(a <> b), ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    Error(#(thrown, state)) ->
+                      Error(#(Thrown, thrown, state.heap))
+                  }
+                _, JsString(b) ->
+                  case js_to_string(state, left) {
+                    Ok(#(a, state)) ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [JsString(a <> b), ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    Error(#(thrown, state)) ->
+                      Error(#(Thrown, thrown, state.heap))
+                  }
+                _, _ ->
+                  case num_binop(left, right, num_add) {
+                    Ok(result) ->
+                      Ok(
+                        State(
+                          ..state,
+                          stack: [result, ..rest],
+                          pc: state.pc + 1,
+                        ),
+                      )
+                    Error(msg) -> {
+                      let #(heap, err) =
+                        object.make_type_error(state.heap, state.builtins, msg)
+                      Error(#(Thrown, err, heap))
+                    }
+                  }
+              }
             _ ->
               case exec_binop(kind, left, right) {
                 Ok(result) ->
@@ -790,8 +819,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     }
 
     MakeClosure(func_index) -> {
-      case list_get(state.func.functions, func_index) {
-        Ok(child_template) -> {
+      case array.get(func_index, state.func.functions) {
+        Some(child_template) -> {
           // Capture values from current frame according to env_descriptors.
           // For boxed captured vars, the local holds a JsObject(box_ref) —
           // copying that ref means the closure shares the same BoxSlot.
@@ -799,9 +828,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             list.map(child_template.env_descriptors, fn(desc) {
               case desc {
                 opcode.CaptureLocal(parent_index) ->
-                  case list_get(state.locals, parent_index) {
-                    Ok(val) -> val
-                    Error(_) -> JsUndefined
+                  case array.get(parent_index, state.locals) {
+                    Some(val) -> val
+                    None -> JsUndefined
                   }
                 opcode.CaptureEnv(_parent_env_index) ->
                   // Transitive capture not yet implemented
@@ -822,16 +851,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             True -> #(
               heap,
               dict.from_list([
-                // "name" on functions: not writable, not enumerable, configurable
-                #(
-                  "name",
-                  DataProperty(
-                    value: fn_name,
-                    writable: False,
-                    enumerable: False,
-                    configurable: True,
-                  ),
-                ),
+                #("name", value.data(fn_name) |> value.configurable()),
               ]),
               None,
             )
@@ -842,33 +862,19 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   ObjectSlot(
                     kind: OrdinaryObject,
                     properties: dict.new(),
-                    elements: dict.new(),
+                    elements: js_elements.new(),
                     prototype: Some(state.builtins.object.prototype),
+                    symbol_properties: dict.new(),
                   ),
                 )
               #(
                 h,
                 dict.from_list([
-                  // "prototype" on functions: writable, not enumerable, not configurable
                   #(
                     "prototype",
-                    DataProperty(
-                      value: JsObject(proto_obj_ref),
-                      writable: True,
-                      enumerable: False,
-                      configurable: False,
-                    ),
+                    value.data(JsObject(proto_obj_ref)) |> value.writable(),
                   ),
-                  // "name" on functions: not writable, not enumerable, configurable
-                  #(
-                    "name",
-                    DataProperty(
-                      value: fn_name,
-                      writable: False,
-                      enumerable: False,
-                      configurable: True,
-                    ),
-                  ),
+                  #("name", value.data(fn_name) |> value.configurable()),
                 ]),
                 Some(proto_obj_ref),
               )
@@ -880,15 +886,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               ObjectSlot(
                 kind: FunctionObject(func_index:, env: env_ref),
                 properties: fn_properties,
-                elements: dict.new(),
+                elements: js_elements.new(),
                 prototype: Some(state.builtins.function.prototype),
+                symbol_properties: dict.new(),
               ),
             )
           // Set .constructor on the prototype pointing back to this function
           let heap = case proto_ref {
             Some(pr) ->
               case heap.read(heap, pr) {
-                Ok(ObjectSlot(kind:, properties: props, elements:, prototype:)) ->
+                Ok(ObjectSlot(
+                  kind:,
+                  properties: props,
+                  elements:,
+                  prototype:,
+                  symbol_properties:,
+                )) ->
                   heap.write(
                     heap,
                     pr,
@@ -901,6 +914,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                       ),
                       elements:,
                       prototype:,
+                      symbol_properties:,
                     ),
                   )
                 _ -> heap
@@ -921,7 +935,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
             ),
           )
         }
-        Error(_) -> {
+        None -> {
           let #(heap, err) =
             object.make_range_error(
               state.heap,
@@ -936,17 +950,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     BoxLocal(index) -> {
       // Wrap the current value in locals[index] into a BoxSlot on the heap.
       // Replace the local with a JsObject(box_ref).
-      case list_get(state.locals, index) {
-        Ok(current_value) -> {
+      case array.get(index, state.locals) {
+        Some(current_value) -> {
           let #(heap, box_ref) =
             heap.alloc(state.heap, value.BoxSlot(current_value))
-          case list_set(state.locals, index, JsObject(box_ref)) {
+          case array.set(index, JsObject(box_ref), state.locals) {
             Ok(locals) -> Ok(State(..state, heap:, locals:, pc: state.pc + 1))
             Error(_) ->
               Error(#(VmError(LocalIndexOutOfBounds(index)), JsUndefined, heap))
           }
         }
-        Error(_) ->
+        None ->
           Error(#(
             VmError(LocalIndexOutOfBounds(index)),
             JsUndefined,
@@ -957,8 +971,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
 
     GetBoxed(index) -> {
       // Read locals[index] (a JsObject(box_ref)), dereference BoxSlot, push value.
-      case list_get(state.locals, index) {
-        Ok(JsObject(box_ref)) -> {
+      case array.get(index, state.locals) {
+        Some(JsObject(box_ref)) -> {
           case heap.read(state.heap, box_ref) {
             Ok(value.BoxSlot(val)) ->
               Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
@@ -983,8 +997,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       // Pop value from stack, write into the BoxSlot pointed to by locals[index].
       case state.stack {
         [new_value, ..rest_stack] -> {
-          case list_get(state.locals, index) {
-            Ok(JsObject(box_ref)) -> {
+          case array.get(index, state.locals) {
+            Some(JsObject(box_ref)) -> {
               let heap =
                 heap.write(state.heap, box_ref, value.BoxSlot(new_value))
               Ok(State(..state, heap:, stack: rest_stack, pc: state.pc + 1))
@@ -1031,7 +1045,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     object.make_type_error(
                       state.heap,
                       state.builtins,
-                      "object is not a function",
+                      object.inspect(JsObject(obj_ref), state.heap)
+                        <> " is not a function",
                     )
                   Error(#(Thrown, err, heap))
                 }
@@ -1042,7 +1057,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 object.make_type_error(
                   state.heap,
                   state.builtins,
-                  typeof_value(non_func, state.heap) <> " is not a function",
+                  object.inspect(non_func, state.heap) <> " is not a function",
                 )
               Error(#(Thrown, err, heap))
             }
@@ -1066,53 +1081,17 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     Jump(target) -> Ok(State(..state, pc: target))
 
     JumpIfFalse(target) -> {
-      case state.stack {
-        [value, ..rest] -> {
-          case is_truthy(value) {
-            True -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-            False -> Ok(State(..state, stack: rest, pc: target))
-          }
-        }
-        [] ->
-          Error(#(
-            VmError(StackUnderflow("JumpIfFalse")),
-            JsUndefined,
-            state.heap,
-          ))
-      }
+      use v <- conditional_jump(state, target)
+      !value.is_truthy(v)
     }
 
-    JumpIfTrue(target) -> {
-      case state.stack {
-        [value, ..rest] -> {
-          case is_truthy(value) {
-            True -> Ok(State(..state, stack: rest, pc: target))
-            False -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-          }
-        }
-        [] ->
-          Error(#(
-            VmError(StackUnderflow("JumpIfTrue")),
-            JsUndefined,
-            state.heap,
-          ))
-      }
-    }
+    JumpIfTrue(target) -> conditional_jump(state, target, value.is_truthy)
 
     JumpIfNullish(target) -> {
-      case state.stack {
-        [value, ..rest] -> {
-          case value {
-            JsNull | JsUndefined -> Ok(State(..state, stack: rest, pc: target))
-            _ -> Ok(State(..state, stack: rest, pc: state.pc + 1))
-          }
-        }
-        [] ->
-          Error(#(
-            VmError(StackUnderflow("JumpIfNullish")),
-            JsUndefined,
-            state.heap,
-          ))
+      use v <- conditional_jump(state, target)
+      case v {
+        JsNull | JsUndefined -> True
+        _ -> False
       }
     }
 
@@ -1203,8 +1182,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           ObjectSlot(
             kind: OrdinaryObject,
             properties: dict.new(),
-            elements: dict.new(),
+            elements: js_elements.new(),
             prototype: Some(state.builtins.object.prototype),
+            symbol_properties: dict.new(),
           ),
         )
       Ok(
@@ -1322,17 +1302,15 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case pop_n(state.stack, count) {
         Ok(#(elements, rest)) -> {
           // elements are in order [first, ..., last]
-          let elements_dict =
-            list.index_map(elements, fn(val, idx) { #(idx, val) })
-            |> dict.from_list()
           let #(heap, ref) =
             heap.alloc(
               state.heap,
               ObjectSlot(
                 kind: ArrayObject(count),
                 properties: dict.new(),
-                elements: elements_dict,
+                elements: js_elements.from_list(elements),
                 prototype: Some(state.builtins.array.prototype),
+                symbol_properties: dict.new(),
               ),
             )
           Ok(
@@ -1352,10 +1330,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     // -- Computed property access --
     GetElem -> {
       case state.stack {
-        [key, JsObject(ref), ..rest] -> {
-          let val = get_elem_value(state.heap, ref, key)
-          Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
-        }
+        [key, JsObject(ref), ..rest] ->
+          case get_elem_value(state, ref, key) {
+            Ok(#(val, state)) ->
+              Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
+          }
         [_, JsNull, ..] -> {
           let #(heap, err) =
             object.make_type_error(
@@ -1391,10 +1371,14 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     GetElem2 -> {
       // Like GetElem but keeps obj+key on stack: [key, obj, ...] -> [value, key, obj, ...]
       case state.stack {
-        [key, JsObject(ref) as obj, ..rest] -> {
-          let val = get_elem_value(state.heap, ref, key)
-          Ok(State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1))
-        }
+        [key, JsObject(ref) as obj, ..rest] ->
+          case get_elem_value(state, ref, key) {
+            Ok(#(val, state)) ->
+              Ok(
+                State(..state, stack: [val, key, obj, ..rest], pc: state.pc + 1),
+              )
+            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
+          }
         [key, JsString(s) as str, ..rest] -> {
           let val =
             get_string_elem(s, key, state.heap, state.builtins.string.prototype)
@@ -1408,10 +1392,12 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
     PutElem -> {
       // Stack: [value, key, obj, ...rest]
       case state.stack {
-        [val, key, JsObject(ref), ..rest] -> {
-          let heap = put_elem_value(state.heap, ref, key, val)
-          Ok(State(..state, heap:, stack: [val, ..rest], pc: state.pc + 1))
-        }
+        [val, key, JsObject(ref), ..rest] ->
+          case put_elem_value(state, ref, key, val) {
+            Ok(state) ->
+              Ok(State(..state, stack: [val, ..rest], pc: state.pc + 1))
+            Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
+          }
         [_, _, _, ..rest] -> {
           // PutElem on non-object: silently ignore (JS sloppy mode)
           Ok(State(..state, stack: rest, pc: state.pc + 1))
@@ -1528,7 +1514,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     object.make_type_error(
                       state.heap,
                       state.builtins,
-                      "is not a function",
+                      object.inspect(JsObject(method_ref), state.heap)
+                        <> " is not a function",
                     )
                   Error(#(Thrown, err, heap))
                 }
@@ -1539,7 +1526,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 object.make_type_error(
                   state.heap,
                   state.builtins,
-                  typeof_value(non_func, state.heap) <> " is not a function",
+                  object.inspect(non_func, state.heap) <> " is not a function",
                 )
               Error(#(Thrown, err, heap))
             }
@@ -1607,8 +1594,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           ObjectSlot(
                             kind: OrdinaryObject,
                             properties: dict.new(),
-                            elements: dict.new(),
+                            elements: js_elements.new(),
                             prototype: proto,
+                            symbol_properties: dict.new(),
                           ),
                         )
                       let new_obj = JsObject(new_obj_ref)
@@ -1644,7 +1632,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     object.make_type_error(
                       state.heap,
                       state.builtins,
-                      "is not a constructor",
+                      object.inspect(JsObject(ctor_ref), state.heap)
+                        <> " is not a constructor",
                     )
                   Error(#(Thrown, err, heap))
                 }
@@ -1655,7 +1644,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 object.make_type_error(
                   state.heap,
                   state.builtins,
-                  typeof_value(non_func, state.heap) <> " is not a constructor",
+                  object.inspect(non_func, state.heap)
+                    <> " is not a constructor",
                 )
               Error(#(Thrown, err, heap))
             }
@@ -1800,7 +1790,8 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     object.make_type_error(
                       state.heap,
                       state.builtins,
-                      "object is not iterable",
+                      object.inspect(JsObject(ref), state.heap)
+                        <> " is not iterable",
                     )
                   Error(#(Thrown, err, heap))
                 }
@@ -1810,7 +1801,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                 object.make_type_error(
                   state.heap,
                   state.builtins,
-                  typeof_value(iterable, state.heap) <> " is not iterable",
+                  object.inspect(iterable, state.heap) <> " is not iterable",
                 )
               Error(#(Thrown, err, heap))
             }
@@ -1835,7 +1826,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   len,
                   elems,
                 )
-                _ -> #(0, dict.new())
+                _ -> #(0, js_elements.new())
               }
               case index >= length {
                 True ->
@@ -1854,10 +1845,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                   )
                 False -> {
                   // Read element at current index
-                  let val = case dict.get(elements, index) {
-                    Ok(v) -> v
-                    Error(_) -> JsUndefined
-                  }
+                  let val = js_elements.get(elements, index)
                   // Advance iterator index
                   let heap =
                     heap.write(
@@ -1880,59 +1868,58 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               // Generator iterator: call .next() and extract {value, done}
               // Use a temporary stack with just the iterator, since
               // call_native_generator_next will push result onto rest_stack.
-              case
-                call_native_generator_next(state, JsObject(iter_ref), [], [])
               {
-                Ok(next_state) ->
-                  // next_state.stack has [result_obj, ...], extract value and done
-                  case next_state.stack {
-                    [JsObject(result_ref), ..] ->
-                      case heap.read(next_state.heap, result_ref) {
-                        Ok(ObjectSlot(properties: props, ..)) -> {
-                          let val = case dict.get(props, "value") {
-                            Ok(DataProperty(value: v, ..)) -> v
-                            _ -> JsUndefined
-                          }
-                          let done = case dict.get(props, "done") {
-                            Ok(DataProperty(value: JsBool(d), ..)) -> d
-                            _ -> False
-                          }
-                          Ok(
-                            State(
-                              ..state,
-                              heap: next_state.heap,
-                              stack: [
-                                JsBool(done),
-                                val,
-                                JsObject(iter_ref),
-                                ..rest
-                              ],
-                              pc: state.pc + 1,
-                              closure_templates: next_state.closure_templates,
-                              globals: next_state.globals,
-                              job_queue: next_state.job_queue,
-                            ),
-                          )
+                use next_state <- result.try(
+                  call_native_generator_next(state, JsObject(iter_ref), [], []),
+                )
+                // next_state.stack has [result_obj, ...], extract value and done
+                case next_state.stack {
+                  [JsObject(result_ref), ..] ->
+                    case heap.read(next_state.heap, result_ref) {
+                      Ok(ObjectSlot(properties: props, ..)) -> {
+                        let val = case dict.get(props, "value") {
+                          Ok(DataProperty(value: v, ..)) -> v
+                          _ -> JsUndefined
                         }
-                        _ ->
-                          Error(#(
-                            VmError(Unimplemented(
-                              "IteratorNext: generator .next() returned non-object",
-                            )),
-                            JsUndefined,
-                            next_state.heap,
-                          ))
+                        let done = case dict.get(props, "done") {
+                          Ok(DataProperty(value: JsBool(d), ..)) -> d
+                          _ -> False
+                        }
+                        Ok(
+                          State(
+                            ..state,
+                            heap: next_state.heap,
+                            stack: [
+                              JsBool(done),
+                              val,
+                              JsObject(iter_ref),
+                              ..rest
+                            ],
+                            pc: state.pc + 1,
+                            closure_templates: next_state.closure_templates,
+                            globals: next_state.globals,
+                            job_queue: next_state.job_queue,
+                          ),
+                        )
                       }
-                    _ ->
-                      Error(#(
-                        VmError(Unimplemented(
-                          "IteratorNext: generator .next() empty stack",
-                        )),
-                        JsUndefined,
-                        next_state.heap,
-                      ))
-                  }
-                Error(err) -> Error(err)
+                      _ ->
+                        Error(#(
+                          VmError(Unimplemented(
+                            "IteratorNext: generator .next() returned non-object",
+                          )),
+                          JsUndefined,
+                          next_state.heap,
+                        ))
+                    }
+                  _ ->
+                    Error(#(
+                      VmError(Unimplemented(
+                        "IteratorNext: generator .next() empty stack",
+                      )),
+                      JsUndefined,
+                      next_state.heap,
+                    ))
+                }
               }
             }
             _ ->
@@ -2000,19 +1987,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
       case state.stack {
         [key, obj, ..rest] ->
           case obj {
-            JsObject(ref) -> {
-              let key_str = to_js_string(key)
-              let #(heap, success) =
-                object.delete_property(state.heap, ref, key_str)
-              Ok(
-                State(
-                  ..state,
-                  stack: [JsBool(success), ..rest],
-                  heap:,
-                  pc: state.pc + 1,
-                ),
-              )
-            }
+            JsObject(ref) ->
+              case js_to_string(state, key) {
+                Ok(#(key_str, state)) -> {
+                  let #(heap, success) =
+                    object.delete_property(state.heap, ref, key_str)
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [JsBool(success), ..rest],
+                      heap:,
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
+              }
             _ ->
               Ok(
                 State(..state, stack: [JsBool(True), ..rest], pc: state.pc + 1),
@@ -2127,8 +2117,9 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           ObjectSlot(
                             kind: OrdinaryObject,
                             properties: dict.new(),
-                            elements: dict.new(),
+                            elements: js_elements.new(),
                             prototype: derived_proto,
+                            symbol_properties: dict.new(),
                           ),
                         )
                       #(h, JsObject(new_obj_ref))
@@ -2389,15 +2380,8 @@ fn call_generator_function(
   case execute_inner(gen_state) {
     Ok(#(YieldCompletion(_, _), suspended)) -> {
       // Save the suspended state into a GeneratorSlot on the heap
-      let saved_try =
-        list.map(suspended.try_stack, fn(tf) {
-          value.SavedTryFrame(
-            catch_target: tf.catch_target,
-            stack_depth: tf.stack_depth,
-          )
-        })
-      let saved_finally =
-        list.map(suspended.finally_stack, convert_finally_completion)
+      let #(saved_try, saved_finally) =
+        save_stacks(suspended.try_stack, suspended.finally_stack)
       let #(h, data_ref) =
         heap.alloc(
           suspended.heap,
@@ -2420,8 +2404,9 @@ fn call_generator_function(
           ObjectSlot(
             kind: GeneratorObject(generator_data: data_ref),
             properties: dict.new(),
-            elements: dict.new(),
+            elements: js_elements.new(),
             prototype: Some(state.builtins.generator.prototype),
+            symbol_properties: dict.new(),
           ),
         )
       // Return to caller with the generator object on the stack
@@ -2448,7 +2433,7 @@ fn call_generator_function(
             func_template_id: fn_ref.id,
             env_ref:,
             saved_pc: 0,
-            saved_locals: [],
+            saved_locals: array.from_list([]),
             saved_stack: [],
             saved_try_stack: [],
             saved_finally_stack: [],
@@ -2461,8 +2446,9 @@ fn call_generator_function(
           ObjectSlot(
             kind: GeneratorObject(generator_data: data_ref),
             properties: dict.new(),
-            elements: dict.new(),
+            elements: js_elements.new(),
             prototype: Some(state.builtins.generator.prototype),
+            symbol_properties: dict.new(),
           ),
         )
       Ok(
@@ -2525,6 +2511,8 @@ fn call_async_function(
   case execute_inner(async_state) {
     Ok(#(YieldCompletion(awaited_value, h2), suspended)) -> {
       // Body hit `await` — save state, set up promise resolution
+      let #(saved_try, saved_finally) =
+        save_stacks(suspended.try_stack, suspended.finally_stack)
       let #(h2, async_data_ref) =
         heap.alloc(
           h2,
@@ -2537,16 +2525,8 @@ fn call_async_function(
             saved_pc: suspended.pc,
             saved_locals: suspended.locals,
             saved_stack: suspended.stack,
-            saved_try_stack: list.map(suspended.try_stack, fn(tf) {
-              value.SavedTryFrame(
-                catch_target: tf.catch_target,
-                stack_depth: tf.stack_depth,
-              )
-            }),
-            saved_finally_stack: list.map(
-              suspended.finally_stack,
-              convert_finally_completion,
-            ),
+            saved_try_stack: saved_try,
+            saved_finally_stack: saved_finally,
             saved_this: suspended.this_binding,
           ),
         )
@@ -2633,8 +2613,9 @@ fn async_setup_await(
           is_reject: False,
         )),
         properties: dict.new(),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(builtins.function.prototype),
+        symbol_properties: dict.new(),
       ),
     )
   let #(h, reject_resume_ref) =
@@ -2646,8 +2627,9 @@ fn async_setup_await(
           is_reject: True,
         )),
         properties: dict.new(),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(builtins.function.prototype),
+        symbol_properties: dict.new(),
       ),
     )
   // Attach .then(fulfillResume, rejectResume) to the awaited promise
@@ -2701,12 +2683,8 @@ fn call_native_async_resume(
       let assert Ok(func_template) =
         dict.get(state.closure_templates, func_template_id)
       // Restore try/finally stacks
-      let restored_try =
-        list.map(saved_try_stack, fn(stf) {
-          TryFrame(catch_target: stf.catch_target, stack_depth: stf.stack_depth)
-        })
-      let restored_finally =
-        list.map(saved_finally_stack, restore_finally_completion)
+      let #(restored_try, restored_finally) =
+        restore_stacks(saved_try_stack, saved_finally_stack)
       // Build the resume stack: push resolved value for fulfillment
       let resume_stack = case is_reject {
         False -> [settled_value, ..saved_stack]
@@ -2774,6 +2752,8 @@ fn call_native_async_resume(
         }
         Ok(#(YieldCompletion(awaited_value, h2), suspended)) -> {
           // Hit another `await` — save state and set up promise resolution
+          let #(saved_try, saved_finally) =
+            save_stacks(suspended.try_stack, suspended.finally_stack)
           let h2 =
             heap.write(
               h2,
@@ -2787,16 +2767,8 @@ fn call_native_async_resume(
                 saved_pc: suspended.pc,
                 saved_locals: suspended.locals,
                 saved_stack: suspended.stack,
-                saved_try_stack: list.map(suspended.try_stack, fn(tf) {
-                  value.SavedTryFrame(
-                    catch_target: tf.catch_target,
-                    stack_depth: tf.stack_depth,
-                  )
-                }),
-                saved_finally_stack: list.map(
-                  suspended.finally_stack,
-                  convert_finally_completion,
-                ),
+                saved_try_stack: saved_try,
+                saved_finally_stack: saved_finally,
                 saved_this: suspended.this_binding,
               ),
             )
@@ -2848,7 +2820,7 @@ fn setup_locals(
   env_ref: value.Ref,
   callee_template: FuncTemplate,
   args: List(JsValue),
-) -> List(JsValue) {
+) -> array.Array(JsValue) {
   let env_values = case heap.read(h, env_ref) {
     Ok(value.EnvSlot(slots)) -> slots
     _ -> []
@@ -2862,6 +2834,37 @@ fn setup_locals(
     padded_args,
     list.repeat(JsUndefined, remaining),
   ])
+  |> array.from_list
+}
+
+/// Save try/finally stacks from frame types to value types for generator suspension.
+fn save_stacks(
+  try_stack: List(TryFrame),
+  finally_stack: List(FinallyCompletion),
+) -> #(List(value.SavedTryFrame), List(value.SavedFinallyCompletion)) {
+  let saved_try =
+    list.map(try_stack, fn(tf) {
+      value.SavedTryFrame(
+        catch_target: tf.catch_target,
+        stack_depth: tf.stack_depth,
+      )
+    })
+  let saved_finally = list.map(finally_stack, convert_finally_completion)
+  #(saved_try, saved_finally)
+}
+
+/// Restore saved try/finally stacks back to frame types for generator resumption.
+fn restore_stacks(
+  saved_try_stack: List(value.SavedTryFrame),
+  saved_finally_stack: List(value.SavedFinallyCompletion),
+) -> #(List(TryFrame), List(FinallyCompletion)) {
+  let restored_try =
+    list.map(saved_try_stack, fn(stf) {
+      TryFrame(catch_target: stf.catch_target, stack_depth: stf.stack_depth)
+    })
+  let restored_finally =
+    list.map(saved_finally_stack, restore_finally_completion)
+  #(restored_try, restored_finally)
 }
 
 /// Convert frame.FinallyCompletion to value.SavedFinallyCompletion for storage.
@@ -2950,8 +2953,9 @@ fn call_native(
                 properties: dict.from_list([
                   #("name", value.builtin_property(JsString(name))),
                 ]),
-                elements: dict.new(),
+                elements: js_elements.new(),
                 prototype: Some(state.builtins.function.prototype),
+                symbol_properties: dict.new(),
               ),
             )
           Ok(
@@ -3059,20 +3063,62 @@ fn call_native(
       call_native_generator_return(state, this, args, rest_stack)
     value.NativeGeneratorThrow ->
       call_native_generator_throw(state, this, args, rest_stack)
+    // Symbol() constructor — callable but NOT new-able
+    value.NativeSymbolConstructor -> {
+      let #(next_id, new_descs, sym_val) =
+        builtins_symbol.call_symbol(
+          args,
+          state.next_symbol_id,
+          state.symbol_descriptions,
+        )
+      Ok(
+        State(
+          ..state,
+          stack: [sym_val, ..rest_stack],
+          pc: state.pc + 1,
+          next_symbol_id: next_id,
+          symbol_descriptions: new_descs,
+        ),
+      )
+    }
+    // String() constructor — uses full ToString (ToPrimitive for objects)
+    value.NativeStringConstructor ->
+      case args {
+        [] ->
+          Ok(
+            State(
+              ..state,
+              stack: [JsString(""), ..rest_stack],
+              pc: state.pc + 1,
+            ),
+          )
+        [val, ..] ->
+          case js_to_string(state, val) {
+            Ok(#(s, new_state)) ->
+              Ok(
+                State(
+                  ..new_state,
+                  stack: [JsString(s), ..rest_stack],
+                  pc: state.pc + 1,
+                ),
+              )
+            Error(#(thrown, new_state)) ->
+              Error(#(Thrown, thrown, new_state.heap))
+          }
+      }
     // All other native functions: synchronous dispatch
     _ -> {
-      let #(h, result) = dispatch_native(native, args, this, state)
+      let #(new_state, result) = dispatch_native(native, args, this, state)
       case result {
         Ok(return_value) ->
           Ok(
             State(
-              ..state,
-              heap: h,
+              ..new_state,
               stack: [return_value, ..rest_stack],
               pc: state.pc + 1,
             ),
           )
-        Error(thrown) -> Error(#(Thrown, thrown, h))
+        Error(thrown) -> Error(#(Thrown, thrown, new_state.heap))
       }
     }
   }
@@ -3102,8 +3148,9 @@ fn construct_value(
           ObjectSlot(
             kind: OrdinaryObject,
             properties: dict.new(),
-            elements: dict.new(),
+            elements: js_elements.new(),
             prototype: proto,
+            symbol_properties: dict.new(),
           ),
         )
       let new_obj = JsObject(new_obj_ref)
@@ -3133,7 +3180,8 @@ fn construct_value(
         object.make_type_error(
           state.heap,
           state.builtins,
-          "is not a constructor",
+          object.inspect(JsObject(target_ref), state.heap)
+            <> " is not a constructor",
         )
       Error(#(Thrown, err, h))
     }
@@ -3169,7 +3217,7 @@ fn call_value(
             object.make_type_error(
               state.heap,
               state.builtins,
-              "object is not a function",
+              object.inspect(callee, state.heap) <> " is not a function",
             )
           Error(#(Thrown, err, h))
         }
@@ -3179,7 +3227,7 @@ fn call_value(
         object.make_type_error(
           state.heap,
           state.builtins,
-          typeof_value(callee, state.heap) <> " is not a function",
+          object.inspect(callee, state.heap) <> " is not a function",
         )
       Error(#(Thrown, err, h))
     }
@@ -3197,7 +3245,7 @@ fn extract_array_args(h: Heap, ref: Ref) -> List(JsValue) {
 }
 
 fn extract_elements_loop(
-  elements: dict.Dict(Int, JsValue),
+  elements: value.JsElements,
   idx: Int,
   length: Int,
   acc: List(JsValue),
@@ -3205,10 +3253,7 @@ fn extract_elements_loop(
   case idx >= length {
     True -> list.reverse(acc)
     False -> {
-      let val = case dict.get(elements, idx) {
-        Ok(v) -> v
-        Error(_) -> JsUndefined
-      }
+      let val = js_elements.get(elements, idx)
       extract_elements_loop(elements, idx + 1, length, [val, ..acc])
     }
   }
@@ -3220,13 +3265,13 @@ fn dispatch_native(
   args: List(JsValue),
   this: JsValue,
   state: State,
-) -> #(Heap, Result(JsValue, JsValue)) {
+) -> #(State, Result(JsValue, JsValue)) {
   case native {
     value.NativeObjectConstructor ->
       builtins_object.call_native(
         args,
         this,
-        state.heap,
+        state,
         state.builtins.object.prototype,
       )
     value.NativeFunctionConstructor -> {
@@ -3236,122 +3281,125 @@ fn dispatch_native(
           state.builtins,
           "Function constructor is not supported",
         )
-      #(heap, Error(err))
+      #(State(..state, heap:), Error(err))
     }
     value.NativeArrayConstructor ->
-      builtins_array.construct(args, state.heap, state.builtins.array.prototype)
-    value.NativeArrayIsArray -> builtins_array.is_array(args, state.heap)
+      builtins_array.construct(args, state, state.builtins.array.prototype)
+    value.NativeArrayIsArray -> builtins_array.is_array(args, state)
     value.NativeErrorConstructor(proto:) ->
-      builtins_error.call_native(proto, args, this, state.heap)
+      builtins_error.call_native(proto, args, this, state)
     value.NativeObjectGetOwnPropertyDescriptor ->
       builtins_object.get_own_property_descriptor(
         args,
-        state.heap,
+        state,
         state.builtins.object.prototype,
       )
     value.NativeObjectDefineProperty ->
-      builtins_object.define_property(args, state.heap)
+      builtins_object.define_property(args, state)
     value.NativeObjectGetOwnPropertyNames ->
       builtins_object.get_own_property_names(
         args,
-        state.heap,
+        state,
         state.builtins.array.prototype,
       )
     value.NativeObjectKeys ->
-      builtins_object.keys(args, state.heap, state.builtins.array.prototype)
+      builtins_object.keys(args, state, state.builtins.array.prototype)
     value.NativeObjectPrototypeHasOwnProperty ->
-      builtins_object.has_own_property(this, args, state.heap)
+      builtins_object.has_own_property(this, args, state)
     value.NativeObjectPrototypePropertyIsEnumerable ->
-      builtins_object.property_is_enumerable(this, args, state.heap)
+      builtins_object.property_is_enumerable(this, args, state)
+    value.NativeObjectPrototypeToString ->
+      builtins_object.object_to_string(this, args, state)
+    value.NativeObjectPrototypeValueOf ->
+      builtins_object.object_value_of(this, args, state)
     value.NativeArrayPrototypeJoin ->
-      builtins_array.array_join(this, args, state.heap)
+      builtins_array.array_join(this, args, state)
     value.NativeArrayPrototypePush ->
-      builtins_array.array_push(this, args, state.heap)
-    value.NativeMathPow -> builtins_math.math_pow(args, state.heap)
+      builtins_array.array_push(this, args, state)
+    value.NativeMathPow -> builtins_math.math_pow(args, state)
     // Math methods
-    value.NativeMathAbs -> builtins_math.math_abs(args, state.heap)
-    value.NativeMathFloor -> builtins_math.math_floor(args, state.heap)
-    value.NativeMathCeil -> builtins_math.math_ceil(args, state.heap)
-    value.NativeMathRound -> builtins_math.math_round(args, state.heap)
-    value.NativeMathTrunc -> builtins_math.math_trunc(args, state.heap)
-    value.NativeMathSqrt -> builtins_math.math_sqrt(args, state.heap)
-    value.NativeMathMax -> builtins_math.math_max(args, state.heap)
-    value.NativeMathMin -> builtins_math.math_min(args, state.heap)
-    value.NativeMathLog -> builtins_math.math_log(args, state.heap)
-    value.NativeMathSin -> builtins_math.math_sin(args, state.heap)
-    value.NativeMathCos -> builtins_math.math_cos(args, state.heap)
+    value.NativeMathAbs -> builtins_math.math_abs(args, state)
+    value.NativeMathFloor -> builtins_math.math_floor(args, state)
+    value.NativeMathCeil -> builtins_math.math_ceil(args, state)
+    value.NativeMathRound -> builtins_math.math_round(args, state)
+    value.NativeMathTrunc -> builtins_math.math_trunc(args, state)
+    value.NativeMathSqrt -> builtins_math.math_sqrt(args, state)
+    value.NativeMathMax -> builtins_math.math_max(args, state)
+    value.NativeMathMin -> builtins_math.math_min(args, state)
+    value.NativeMathLog -> builtins_math.math_log(args, state)
+    value.NativeMathSin -> builtins_math.math_sin(args, state)
+    value.NativeMathCos -> builtins_math.math_cos(args, state)
     // String.prototype methods
     value.NativeStringPrototypeCharAt ->
-      builtins_string.string_char_at(this, args, state.heap)
+      builtins_string.string_char_at(this, args, state)
     value.NativeStringPrototypeCharCodeAt ->
-      builtins_string.string_char_code_at(this, args, state.heap)
+      builtins_string.string_char_code_at(this, args, state)
     value.NativeStringPrototypeIndexOf ->
-      builtins_string.string_index_of(this, args, state.heap)
+      builtins_string.string_index_of(this, args, state)
     value.NativeStringPrototypeLastIndexOf ->
-      builtins_string.string_last_index_of(this, args, state.heap)
+      builtins_string.string_last_index_of(this, args, state)
     value.NativeStringPrototypeIncludes ->
-      builtins_string.string_includes(this, args, state.heap)
+      builtins_string.string_includes(this, args, state)
     value.NativeStringPrototypeStartsWith ->
-      builtins_string.string_starts_with(this, args, state.heap)
+      builtins_string.string_starts_with(this, args, state)
     value.NativeStringPrototypeEndsWith ->
-      builtins_string.string_ends_with(this, args, state.heap)
+      builtins_string.string_ends_with(this, args, state)
     value.NativeStringPrototypeSlice ->
-      builtins_string.string_slice(this, args, state.heap)
+      builtins_string.string_slice(this, args, state)
     value.NativeStringPrototypeSubstring ->
-      builtins_string.string_substring(this, args, state.heap)
+      builtins_string.string_substring(this, args, state)
     value.NativeStringPrototypeToLowerCase ->
-      builtins_string.string_to_lower_case(this, args, state.heap)
+      builtins_string.string_to_lower_case(this, args, state)
     value.NativeStringPrototypeToUpperCase ->
-      builtins_string.string_to_upper_case(this, args, state.heap)
+      builtins_string.string_to_upper_case(this, args, state)
     value.NativeStringPrototypeTrim ->
-      builtins_string.string_trim(this, args, state.heap)
+      builtins_string.string_trim(this, args, state)
     value.NativeStringPrototypeTrimStart ->
-      builtins_string.string_trim_start(this, args, state.heap)
+      builtins_string.string_trim_start(this, args, state)
     value.NativeStringPrototypeTrimEnd ->
-      builtins_string.string_trim_end(this, args, state.heap)
+      builtins_string.string_trim_end(this, args, state)
     value.NativeStringPrototypeSplit ->
       builtins_string.string_split(
         this,
         args,
-        state.heap,
+        state,
         state.builtins.array.prototype,
       )
     value.NativeStringPrototypeConcat ->
-      builtins_string.string_concat(this, args, state.heap)
+      builtins_string.string_concat(this, args, state)
     value.NativeStringPrototypeToString ->
-      builtins_string.string_to_string(this, args, state.heap)
+      builtins_string.string_to_string(this, args, state)
     value.NativeStringPrototypeValueOf ->
-      builtins_string.string_value_of(this, args, state.heap)
+      builtins_string.string_value_of(this, args, state)
     value.NativeStringPrototypeRepeat ->
-      builtins_string.string_repeat(this, args, state.heap)
+      builtins_string.string_repeat(this, args, state)
     value.NativeStringPrototypePadStart ->
-      builtins_string.string_pad_start(this, args, state.heap)
+      builtins_string.string_pad_start(this, args, state)
     value.NativeStringPrototypePadEnd ->
-      builtins_string.string_pad_end(this, args, state.heap)
+      builtins_string.string_pad_end(this, args, state)
     value.NativeStringPrototypeAt ->
-      builtins_string.string_at(this, args, state.heap)
-    // String/Number/Boolean constructors (type coercion)
+      builtins_string.string_at(this, args, state)
+    // Number/Boolean constructors (type coercion)
+    // NativeStringConstructor is handled in call_native (needs ToPrimitive)
     value.NativeStringConstructor ->
-      builtins_string.call_as_function(args, state.heap)
+      panic as "NativeStringConstructor should be handled in call_native"
     value.NativeNumberConstructor ->
-      builtins_number.call_as_function(args, state.heap)
+      builtins_number.call_as_function(args, state)
     value.NativeBooleanConstructor ->
-      builtins_boolean.call_as_function(args, state.heap)
+      builtins_boolean.call_as_function(args, state)
     // Global utility functions
-    value.NativeParseInt -> builtins_number.parse_int(args, state.heap)
-    value.NativeParseFloat -> builtins_number.parse_float(args, state.heap)
-    value.NativeIsNaN -> builtins_number.js_is_nan(args, state.heap)
-    value.NativeIsFinite -> builtins_number.js_is_finite(args, state.heap)
+    value.NativeParseInt -> builtins_number.parse_int(args, state)
+    value.NativeParseFloat -> builtins_number.parse_float(args, state)
+    value.NativeIsNaN -> builtins_number.js_is_nan(args, state)
+    value.NativeIsFinite -> builtins_number.js_is_finite(args, state)
     // Number static methods (strict — no coercion)
-    value.NativeNumberIsNaN -> builtins_number.number_is_nan(args, state.heap)
-    value.NativeNumberIsFinite ->
-      builtins_number.number_is_finite(args, state.heap)
+    value.NativeNumberIsNaN -> builtins_number.number_is_nan(args, state)
+    value.NativeNumberIsFinite -> builtins_number.number_is_finite(args, state)
     value.NativeNumberIsInteger ->
-      builtins_number.number_is_integer(args, state.heap)
+      builtins_number.number_is_integer(args, state)
     // Number.parseInt/parseFloat are identical to global ones per spec
-    value.NativeNumberParseInt -> builtins_number.parse_int(args, state.heap)
-    value.NativeNumberParseFloat ->
-      builtins_number.parse_float(args, state.heap)
+    value.NativeNumberParseInt -> builtins_number.parse_int(args, state)
+    value.NativeNumberParseFloat -> builtins_number.parse_float(args, state)
     // These are handled in call_native before reaching dispatch_native.
     // If we ever get here, it's a bug.
     value.NativeFunctionCall
@@ -3378,6 +3426,10 @@ fn dispatch_native(
       panic as "Generator natives should be handled in call_native"
     value.NativeAsyncResume(..) ->
       panic as "NativeAsyncResume should be handled in call_native"
+    value.NativeSymbolConstructor ->
+      panic as "NativeSymbolConstructor should be handled in call_native"
+    // %IteratorPrototype%[Symbol.iterator]() — returns `this`
+    value.NativeIteratorSymbolIterator -> #(state, Ok(this))
   }
 }
 
@@ -3696,8 +3748,9 @@ fn call_native_promise_finally(
               on_finally:,
             )),
             properties: dict.new(),
-            elements: dict.new(),
+            elements: js_elements.new(),
             prototype: Some(state.builtins.function.prototype),
+            symbol_properties: dict.new(),
           ),
         )
       // Create reject wrapper: calls onFinally(), then re-throws original reason
@@ -3709,8 +3762,9 @@ fn call_native_promise_finally(
               on_finally:,
             )),
             properties: dict.new(),
-            elements: dict.new(),
+            elements: js_elements.new(),
             prototype: Some(state.builtins.function.prototype),
+            symbol_properties: dict.new(),
           ),
         )
       call_native_promise_then(
@@ -3810,8 +3864,9 @@ fn finally_chain_value(
           value: captured_value,
         )),
         properties: dict.new(),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(state.builtins.function.prototype),
+        symbol_properties: dict.new(),
       ),
     )
   // Chain .then(thunk) on the resolved promise
@@ -3857,8 +3912,9 @@ fn finally_chain_throw(
           reason: captured_reason,
         )),
         properties: dict.new(),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(state.builtins.function.prototype),
+        symbol_properties: dict.new(),
       ),
     )
   // Chain .then(thrower) on the resolved promise
@@ -4029,15 +4085,8 @@ fn call_native_generator_next(
               gen_with_state(gen, value.Executing),
             )
           // Restore the generator's execution state
-          let restored_try =
-            list.map(gen.saved_try_stack, fn(stf) {
-              TryFrame(
-                catch_target: stf.catch_target,
-                stack_depth: stf.stack_depth,
-              )
-            })
-          let restored_finally =
-            list.map(gen.saved_finally_stack, restore_finally_completion)
+          let #(restored_try, restored_finally) =
+            restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
           // For SuspendedYield, push the .next() arg onto the saved stack
           // (the Yield opcode left pc pointing past Yield, stack has value popped)
           let gen_stack = case gen.gen_state {
@@ -4068,15 +4117,8 @@ fn call_native_generator_next(
           case execute_inner(gen_exec_state) {
             Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
               // Generator yielded — save state back
-              let saved_try2 =
-                list.map(suspended.try_stack, fn(tf) {
-                  value.SavedTryFrame(
-                    catch_target: tf.catch_target,
-                    stack_depth: tf.stack_depth,
-                  )
-                })
-              let saved_finally2 =
-                list.map(suspended.finally_stack, convert_finally_completion)
+              let #(saved_try2, saved_finally2) =
+                save_stacks(suspended.try_stack, suspended.finally_stack)
               let h3 =
                 heap.write(
                   h2,
@@ -4220,15 +4262,8 @@ fn call_native_generator_return(
               gen_with_state(gen, value.Executing),
             )
           // Restore the generator's execution state
-          let restored_try =
-            list.map(gen.saved_try_stack, fn(stf) {
-              TryFrame(
-                catch_target: stf.catch_target,
-                stack_depth: stf.stack_depth,
-              )
-            })
-          let restored_finally =
-            list.map(gen.saved_finally_stack, restore_finally_completion)
+          let #(restored_try, restored_finally) =
+            restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
           let assert Ok(func_template) =
             dict.get(state.closure_templates, gen.func_template_id)
           let gen_exec_state =
@@ -4311,15 +4346,8 @@ fn call_native_generator_throw(
               gen_with_state(gen, value.Executing),
             )
           // Restore the generator's execution state
-          let restored_try =
-            list.map(gen.saved_try_stack, fn(stf) {
-              TryFrame(
-                catch_target: stf.catch_target,
-                stack_depth: stf.stack_depth,
-              )
-            })
-          let restored_finally =
-            list.map(gen.saved_finally_stack, restore_finally_completion)
+          let #(restored_try, restored_finally) =
+            restore_stacks(gen.saved_try_stack, gen.saved_finally_stack)
           let assert Ok(func_template) =
             dict.get(state.closure_templates, gen.func_template_id)
           let gen_exec_state =
@@ -4344,18 +4372,8 @@ fn call_native_generator_throw(
               // The generator caught it — continue executing
               case execute_inner(caught_state) {
                 Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
-                  let saved_try2 =
-                    list.map(suspended.try_stack, fn(tf) {
-                      value.SavedTryFrame(
-                        catch_target: tf.catch_target,
-                        stack_depth: tf.stack_depth,
-                      )
-                    })
-                  let saved_finally2 =
-                    list.map(
-                      suspended.finally_stack,
-                      convert_finally_completion,
-                    )
+                  let #(saved_try2, saved_finally2) =
+                    save_stacks(suspended.try_stack, suspended.finally_stack)
                   let h3 =
                     heap.write(
                       h2,
@@ -4474,7 +4492,7 @@ type GenData {
     func_template_id: Int,
     env_ref: Ref,
     saved_pc: Int,
-    saved_locals: List(JsValue),
+    saved_locals: array.Array(JsValue),
     saved_stack: List(JsValue),
     saved_try_stack: List(value.SavedTryFrame),
     saved_finally_stack: List(value.SavedFinallyCompletion),
@@ -4541,14 +4559,14 @@ fn gen_with_state(
 /// try/finally handler (identified by EnterFinallyThrow at catch_target).
 /// Returns Some(#(catch_target, stack_depth, remaining_try_stack)) or None.
 fn find_next_finally(
-  code: List(Op),
+  code: array.Array(Op),
   try_stack: List(TryFrame),
 ) -> Result(#(Int, Int, List(TryFrame)), Nil) {
   case try_stack {
     [] -> Error(Nil)
     [TryFrame(catch_target:, stack_depth:), ..rest] ->
-      case list_get(code, catch_target) {
-        Ok(EnterFinallyThrow) -> Ok(#(catch_target, stack_depth, rest))
+      case array.get(catch_target, code) {
+        Some(EnterFinallyThrow) -> Ok(#(catch_target, stack_depth, rest))
         _ -> find_next_finally(code, rest)
       }
   }
@@ -4632,15 +4650,8 @@ fn process_generator_return(
         Ok(#(YieldCompletion(yielded_value, h2), suspended)) -> {
           // Generator yielded from inside the finally block.
           // Save state so next .next() resumes inside the finally.
-          let saved_try2 =
-            list.map(suspended.try_stack, fn(tf) {
-              value.SavedTryFrame(
-                catch_target: tf.catch_target,
-                stack_depth: tf.stack_depth,
-              )
-            })
-          let saved_finally2 =
-            list.map(suspended.finally_stack, convert_finally_completion)
+          let #(saved_try2, saved_finally2) =
+            save_stacks(suspended.try_stack, suspended.finally_stack)
           let h3 =
             heap.write(
               h2,
@@ -4712,8 +4723,9 @@ fn create_iterator_result(
           #("value", value.data_property(val)),
           #("done", value.data_property(JsBool(done))),
         ]),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(builtins.object.prototype),
+        symbol_properties: dict.new(),
       ),
     )
   #(h, JsObject(ref))
@@ -4829,7 +4841,7 @@ fn run_handler_with_this(
               ..state,
               stack: [],
               pc: 0,
-              code: [],
+              code: array.from_list([]),
               call_stack: [],
               try_stack: [],
             )
@@ -4894,6 +4906,7 @@ fn run_closure_for_job(
           padded_args,
           list.repeat(JsUndefined, remaining),
         ])
+        |> array.from_list
       let new_this = case callee_template.is_arrow {
         True -> state.this_binding
         False -> this_val
@@ -4986,11 +4999,17 @@ fn set_slot_prototype(
   new_proto: option.Option(value.Ref),
 ) -> Heap {
   case heap.read(h, ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, ..)) ->
+    Ok(ObjectSlot(kind:, properties:, elements:, symbol_properties:, ..)) ->
       heap.write(
         h,
         ref,
-        ObjectSlot(kind:, properties:, elements:, prototype: new_proto),
+        ObjectSlot(
+          kind:,
+          properties:,
+          elements:,
+          prototype: new_proto,
+          symbol_properties:,
+        ),
       )
     _ -> h
   }
@@ -5080,94 +5099,140 @@ fn get_string_elem(
 
 /// Read a property from a unified object using a JsValue key.
 /// Dispatches on ExoticKind: arrays use elements dict, others use properties.
-fn get_elem_value(heap: Heap, ref: value.Ref, key: JsValue) -> JsValue {
-  case heap.read(heap, ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) ->
-      case kind {
-        ArrayObject(length:) ->
-          case to_array_index(key) {
-            Ok(idx) ->
-              case dict.get(elements, idx) {
-                Ok(val) -> val
-                Error(_) -> JsUndefined
-              }
-            Error(_) ->
-              // Non-numeric key on array — check "length", then properties, then prototype
-              case key {
-                JsString("length") -> JsNumber(Finite(int.to_float(length)))
-                _ -> {
-                  let key_str = to_js_string(key)
-                  case dict.get(properties, key_str) {
-                    Ok(DataProperty(value: val, ..)) -> val
-                    Error(_) ->
-                      case prototype {
-                        Some(proto_ref) -> get_elem_value(heap, proto_ref, key)
-                        None -> JsUndefined
+/// Returns Result to handle thrown exceptions from js_to_string (ToPrimitive).
+fn get_elem_value(
+  state: State,
+  ref: value.Ref,
+  key: JsValue,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  // Symbol keys use the separate symbol_properties dict
+  case key {
+    value.JsSymbol(sym_id) -> {
+      let val =
+        object.get_symbol_property(state.heap, ref, sym_id)
+        |> result.unwrap(JsUndefined)
+      Ok(#(val, state))
+    }
+    _ ->
+      case heap.read(state.heap, ref) {
+        Ok(ObjectSlot(kind:, properties:, elements:, prototype:, ..)) ->
+          case kind {
+            ArrayObject(length:) ->
+              case to_array_index(key) {
+                Ok(idx) -> Ok(#(js_elements.get(elements, idx), state))
+                Error(_) ->
+                  // Non-numeric key on array — check "length", then properties, then prototype
+                  case key {
+                    JsString("length") ->
+                      Ok(#(JsNumber(Finite(int.to_float(length))), state))
+                    _ ->
+                      case js_to_string(state, key) {
+                        Ok(#(key_str, state)) ->
+                          case dict.get(properties, key_str) {
+                            Ok(DataProperty(value: val, ..)) ->
+                              Ok(#(val, state))
+                            Error(_) ->
+                              case prototype {
+                                Some(proto_ref) ->
+                                  get_elem_value(state, proto_ref, key)
+                                None -> Ok(#(JsUndefined, state))
+                              }
+                          }
+                        Error(#(thrown, state)) -> Error(#(thrown, state))
                       }
                   }
-                }
+              }
+            OrdinaryObject
+            | FunctionObject(..)
+            | NativeFunction(_)
+            | value.PromiseObject(_)
+            | value.GeneratorObject(_) ->
+              case js_to_string(state, key) {
+                Ok(#(key_str, state)) ->
+                  case object.get_property(state.heap, ref, key_str) {
+                    Ok(val) -> Ok(#(val, state))
+                    Error(_) -> Ok(#(JsUndefined, state))
+                  }
+                Error(#(thrown, state)) -> Error(#(thrown, state))
               }
           }
-        OrdinaryObject
-        | FunctionObject(..)
-        | NativeFunction(_)
-        | value.PromiseObject(_)
-        | value.GeneratorObject(_) -> {
-          let key_str = to_js_string(key)
-          case object.get_property(heap, ref, key_str) {
-            Ok(val) -> val
-            Error(_) -> JsUndefined
-          }
-        }
+        _ -> Ok(#(JsUndefined, state))
       }
-    _ -> JsUndefined
   }
 }
 
 /// Write a property to a unified object using a JsValue key.
+/// Returns Result to handle thrown exceptions from js_to_string (ToPrimitive).
 fn put_elem_value(
-  heap: Heap,
+  state: State,
   ref: value.Ref,
   key: JsValue,
   val: JsValue,
-) -> Heap {
-  case heap.read(heap, ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) ->
-      case kind {
-        ArrayObject(length:) ->
-          case to_array_index(key) {
-            Ok(idx) -> {
-              let new_elements = dict.insert(elements, idx, val)
-              let new_length = case idx >= length {
-                True -> idx + 1
-                False -> length
+) -> Result(State, #(JsValue, State)) {
+  // Symbol keys use the separate symbol_properties dict
+  case key {
+    value.JsSymbol(sym_id) -> {
+      let new_heap = object.set_symbol_property(state.heap, ref, sym_id, val)
+      Ok(State(..state, heap: new_heap))
+    }
+    _ ->
+      case heap.read(state.heap, ref) {
+        Ok(ObjectSlot(
+          kind:,
+          properties:,
+          elements:,
+          prototype:,
+          symbol_properties:,
+        )) ->
+          case kind {
+            ArrayObject(length:) ->
+              case to_array_index(key) {
+                Ok(idx) -> {
+                  let new_elements = js_elements.set(elements, idx, val)
+                  let new_length = case idx >= length {
+                    True -> idx + 1
+                    False -> length
+                  }
+                  let new_heap =
+                    heap.write(
+                      state.heap,
+                      ref,
+                      ObjectSlot(
+                        kind: ArrayObject(new_length),
+                        properties:,
+                        elements: new_elements,
+                        prototype:,
+                        symbol_properties:,
+                      ),
+                    )
+                  Ok(State(..state, heap: new_heap))
+                }
+                Error(_) ->
+                  case js_to_string(state, key) {
+                    Ok(#(key_str, state)) -> {
+                      let new_heap =
+                        object.set_property(state.heap, ref, key_str, val)
+                      Ok(State(..state, heap: new_heap))
+                    }
+                    Error(#(thrown, state)) -> Error(#(thrown, state))
+                  }
               }
-              heap.write(
-                heap,
-                ref,
-                ObjectSlot(
-                  kind: ArrayObject(new_length),
-                  properties:,
-                  elements: new_elements,
-                  prototype:,
-                ),
-              )
-            }
-            Error(_) -> {
-              let key_str = to_js_string(key)
-              object.set_property(heap, ref, key_str, val)
-            }
+            OrdinaryObject
+            | FunctionObject(..)
+            | NativeFunction(_)
+            | value.PromiseObject(_)
+            | value.GeneratorObject(_) ->
+              case js_to_string(state, key) {
+                Ok(#(key_str, state)) -> {
+                  let new_heap =
+                    object.set_property(state.heap, ref, key_str, val)
+                  Ok(State(..state, heap: new_heap))
+                }
+                Error(#(thrown, state)) -> Error(#(thrown, state))
+              }
           }
-        OrdinaryObject
-        | FunctionObject(..)
-        | NativeFunction(_)
-        | value.PromiseObject(_)
-        | value.GeneratorObject(_) -> {
-          let key_str = to_js_string(key)
-          object.set_property(heap, ref, key_str, val)
-        }
+        _ -> Ok(state)
       }
-    _ -> heap
   }
 }
 
@@ -5207,24 +5272,9 @@ fn typeof_value(val: JsValue, heap: Heap) -> String {
     JsObject(ref) ->
       case heap.read(heap, ref) {
         Ok(ObjectSlot(kind: FunctionObject(..), ..)) -> "function"
-        Ok(ObjectSlot(kind: NativeFunction(_), ..)) -> "function"
+        Ok(ObjectSlot(kind: NativeFunction(..), ..)) -> "function"
         _ -> "object"
       }
-  }
-}
-
-/// JS ToBoolean: https://tc39.es/ecma262/#sec-toboolean
-fn is_truthy(val: JsValue) -> Bool {
-  case val {
-    JsUndefined | JsNull | JsUninitialized -> False
-    JsBool(b) -> b
-    JsNumber(NaN) -> False
-    JsNumber(Finite(n)) -> n != 0.0
-    JsNumber(Infinity) | JsNumber(NegInfinity) -> True
-    JsString(s) -> s != ""
-    JsBigInt(value.BigInt(n)) -> n != 0
-    // Objects (including functions and arrays) and symbols are always truthy
-    JsObject(_) | JsSymbol(_) -> True
   }
 }
 
@@ -5235,8 +5285,8 @@ fn exec_binop(
   right: JsValue,
 ) -> Result(JsValue, String) {
   case kind {
-    // Arithmetic — JS + is overloaded for string concat
-    Add -> js_add(left, right)
+    // Add is handled directly in the BinOp dispatcher with ToPrimitive
+    Add -> panic as "Add should be handled in BinOp dispatcher"
     Sub -> num_binop(left, right, num_sub)
     Mul -> num_binop(left, right, num_mul)
     Div -> num_binop(left, right, num_div)
@@ -5247,21 +5297,21 @@ fn exec_binop(
     BitAnd -> bitwise_binop(left, right, int.bitwise_and)
     BitOr -> bitwise_binop(left, right, int.bitwise_or)
     BitXor -> bitwise_binop(left, right, int.bitwise_exclusive_or)
-    ShiftLeft ->
-      bitwise_binop(left, right, fn(a, b) {
-        int.bitwise_shift_left(a, int.bitwise_and(b, 31))
-      })
-    ShiftRight ->
-      bitwise_binop(left, right, fn(a, b) {
-        int.bitwise_shift_right(a, int.bitwise_and(b, 31))
-      })
-    UShiftRight ->
-      bitwise_binop(left, right, fn(a, b) {
-        int.bitwise_shift_right(
-          int.bitwise_and(a, 0xFFFFFFFF),
-          int.bitwise_and(b, 31),
-        )
-      })
+    ShiftLeft -> {
+      use a, b <- bitwise_binop(left, right)
+      int.bitwise_shift_left(a, int.bitwise_and(b, 31))
+    }
+    ShiftRight -> {
+      use a, b <- bitwise_binop(left, right)
+      int.bitwise_shift_right(a, int.bitwise_and(b, 31))
+    }
+    UShiftRight -> {
+      use a, b <- bitwise_binop(left, right)
+      int.bitwise_shift_right(
+        int.bitwise_and(a, 0xFFFFFFFF),
+        int.bitwise_and(b, 31),
+      )
+    }
 
     // Comparison
     StrictEq -> Ok(JsBool(strict_equal(left, right)))
@@ -5269,12 +5319,22 @@ fn exec_binop(
     Eq -> Ok(JsBool(abstract_equal(left, right)))
     NotEq -> Ok(JsBool(!abstract_equal(left, right)))
 
-    Lt -> compare_values(left, right, fn(ord) { ord == LtOrd })
-    LtEq ->
-      compare_values(left, right, fn(ord) { ord == LtOrd || ord == EqOrd })
-    Gt -> compare_values(left, right, fn(ord) { ord == GtOrd })
-    GtEq ->
-      compare_values(left, right, fn(ord) { ord == GtOrd || ord == EqOrd })
+    Lt -> {
+      use ord <- compare_values(left, right)
+      ord == LtOrd
+    }
+    LtEq -> {
+      use ord <- compare_values(left, right)
+      ord == LtOrd || ord == EqOrd
+    }
+    Gt -> {
+      use ord <- compare_values(left, right)
+      ord == GtOrd
+    }
+    GtEq -> {
+      use ord <- compare_values(left, right)
+      ord == GtOrd || ord == EqOrd
+    }
 
     // In and InstanceOf handled in BinOp dispatcher (needs heap access)
     opcode.In -> Error("in: unreachable — handled in dispatcher")
@@ -5283,36 +5343,22 @@ fn exec_binop(
   }
 }
 
-/// JS + operator: string concat if either side is string, else numeric add.
-fn js_add(left: JsValue, right: JsValue) -> Result(JsValue, String) {
-  case left, right {
-    JsString(a), JsString(b) -> Ok(JsString(a <> b))
-    JsString(a), _ -> Ok(JsString(a <> to_js_string(right)))
-    _, JsString(b) -> Ok(JsString(to_js_string(left) <> b))
-    _, _ -> num_binop(left, right, num_add)
-  }
-}
-
 /// Execute a unary operation.
 fn exec_unaryop(kind: UnaryOpKind, operand: JsValue) -> Result(JsValue, String) {
   case kind {
-    Neg ->
-      case to_number(operand) {
-        Ok(n) -> Ok(JsNumber(num_negate(n)))
-        Error(e) -> Error(e)
-      }
-    Pos ->
-      case to_number(operand) {
-        Ok(n) -> Ok(JsNumber(n))
-        Error(e) -> Error(e)
-      }
-    BitNot ->
-      case to_number(operand) {
-        Ok(n) ->
-          Ok(JsNumber(Finite(int.to_float(int.bitwise_not(num_to_int32(n))))))
-        Error(e) -> Error(e)
-      }
-    LogicalNot -> Ok(JsBool(!is_truthy(operand)))
+    Neg -> {
+      use n <- result.map(to_number(operand))
+      JsNumber(num_negate(n))
+    }
+    Pos -> {
+      use n <- result.map(to_number(operand))
+      JsNumber(n)
+    }
+    BitNot -> {
+      use n <- result.map(to_number(operand))
+      JsNumber(Finite(int.to_float(int.bitwise_not(num_to_int32(n)))))
+    }
+    LogicalNot -> Ok(JsBool(!value.is_truthy(operand)))
     Void -> Ok(JsUndefined)
   }
 }
@@ -5433,10 +5479,9 @@ fn num_binop(
   right: JsValue,
   op: fn(JsNum, JsNum) -> JsNum,
 ) -> Result(JsValue, String) {
-  case to_number(left), to_number(right) {
-    Ok(a), Ok(b) -> Ok(JsNumber(op(a, b)))
-    Error(e), _ | _, Error(e) -> Error(e)
-  }
+  use a <- result.try(to_number(left))
+  use b <- result.map(to_number(right))
+  JsNumber(op(a, b))
 }
 
 /// Apply a bitwise binary operation (convert to i32, operate, convert back).
@@ -5445,11 +5490,9 @@ fn bitwise_binop(
   right: JsValue,
   op: fn(Int, Int) -> Int,
 ) -> Result(JsValue, String) {
-  case to_number(left), to_number(right) {
-    Ok(a), Ok(b) ->
-      Ok(JsNumber(Finite(int.to_float(op(num_to_int32(a), num_to_int32(b))))))
-    Error(e), _ | _, Error(e) -> Error(e)
-  }
+  use a <- result.try(to_number(left))
+  use b <- result.map(to_number(right))
+  JsNumber(Finite(int.to_float(op(num_to_int32(a), num_to_int32(b)))))
 }
 
 /// JS ToNumber: https://tc39.es/ecma262/#sec-tonumber
@@ -5477,9 +5520,237 @@ fn to_number(val: JsValue) -> Result(JsNum, String) {
   }
 }
 
-/// JS ToString — delegates to value.to_js_string.
-fn to_js_string(val: JsValue) -> String {
-  value.to_js_string(val)
+// ============================================================================
+// ToPrimitive / ToString with VM re-entry (ES2024 §7.1.1, §7.1.12)
+// ============================================================================
+
+type ToPrimitiveHint {
+  StringHint
+  NumberHint
+  DefaultHint
+}
+
+/// ES2024 §7.1.1 ToPrimitive(input, preferredType)
+/// For primitives, returns as-is. For objects, calls Symbol.toPrimitive
+/// or falls back to OrdinaryToPrimitive.
+fn to_primitive(
+  state: State,
+  val: JsValue,
+  hint: ToPrimitiveHint,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case val {
+    // Primitives pass through
+    JsUndefined
+    | JsNull
+    | JsBool(_)
+    | JsNumber(_)
+    | JsString(_)
+    | JsSymbol(_)
+    | JsBigInt(_)
+    | JsUninitialized -> Ok(#(val, state))
+    // Objects: try Symbol.toPrimitive, then OrdinaryToPrimitive
+    JsObject(ref) -> {
+      // §7.1.1 step 2.a: check @@toPrimitive
+      case
+        object.get_symbol_property(state.heap, ref, value.symbol_to_primitive)
+      {
+        Ok(exotic_fn) ->
+          case is_callable_value(state.heap, exotic_fn) {
+            True -> {
+              let hint_str = case hint {
+                StringHint -> "string"
+                NumberHint -> "number"
+                DefaultHint -> "default"
+              }
+              case
+                run_handler_with_this(state, exotic_fn, val, [
+                  JsString(hint_str),
+                ])
+              {
+                Ok(#(result, new_state)) ->
+                  case result {
+                    JsObject(_) -> {
+                      let #(h, err) =
+                        object.make_type_error(
+                          new_state.heap,
+                          new_state.builtins,
+                          "Cannot convert object to primitive value",
+                        )
+                      Error(#(err, State(..new_state, heap: h)))
+                    }
+                    _ -> Ok(#(result, new_state))
+                  }
+                Error(#(thrown, new_state)) -> Error(#(thrown, new_state))
+              }
+            }
+            False -> {
+              let #(h, err) =
+                object.make_type_error(
+                  state.heap,
+                  state.builtins,
+                  "@@toPrimitive is not callable",
+                )
+              Error(#(err, State(..state, heap: h)))
+            }
+          }
+        Error(_) -> ordinary_to_primitive(state, val, ref, hint)
+      }
+    }
+  }
+}
+
+/// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint)
+/// Tries toString/valueOf (or valueOf/toString for number hint).
+fn ordinary_to_primitive(
+  state: State,
+  val: JsValue,
+  ref: Ref,
+  hint: ToPrimitiveHint,
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  let method_names = case hint {
+    StringHint -> ["toString", "valueOf"]
+    NumberHint | DefaultHint -> ["valueOf", "toString"]
+  }
+  try_to_primitive_methods(state, val, ref, method_names)
+}
+
+/// Try each method name in order; return the first primitive result.
+fn try_to_primitive_methods(
+  state: State,
+  val: JsValue,
+  ref: Ref,
+  method_names: List(String),
+) -> Result(#(JsValue, State), #(JsValue, State)) {
+  case method_names {
+    [] -> {
+      let #(h, err) =
+        object.make_type_error(
+          state.heap,
+          state.builtins,
+          "Cannot convert object to primitive value",
+        )
+      Error(#(err, State(..state, heap: h)))
+    }
+    [name, ..rest] ->
+      case object.get_property(state.heap, ref, name) {
+        Ok(method) ->
+          case is_callable_value(state.heap, method) {
+            True ->
+              case run_handler_with_this(state, method, val, []) {
+                Ok(#(result, new_state)) ->
+                  case result {
+                    JsObject(_) ->
+                      try_to_primitive_methods(new_state, val, ref, rest)
+                    _ -> Ok(#(result, new_state))
+                  }
+                Error(#(thrown, new_state)) -> Error(#(thrown, new_state))
+              }
+            False -> try_to_primitive_methods(state, val, ref, rest)
+          }
+        Error(_) -> try_to_primitive_methods(state, val, ref, rest)
+      }
+  }
+}
+
+/// ES2024 §7.1.12 ToString with VM re-entry for ToPrimitive.
+/// For primitives, converts directly. For objects, calls ToPrimitive(string) first.
+fn js_to_string(
+  state: State,
+  val: JsValue,
+) -> Result(#(String, State), #(JsValue, State)) {
+  case val {
+    JsObject(_) -> {
+      use #(prim, new_state) <- result.try(to_primitive(state, val, StringHint))
+      js_to_string(new_state, prim)
+    }
+    JsSymbol(_) -> {
+      let #(h, err) =
+        object.make_type_error(
+          state.heap,
+          state.builtins,
+          "Cannot convert a Symbol value to a string",
+        )
+      Error(#(err, State(..state, heap: h)))
+    }
+    JsString(s) -> Ok(#(s, state))
+    JsNumber(Finite(n)) -> Ok(#(value.js_format_number(n), state))
+    JsNumber(NaN) -> Ok(#("NaN", state))
+    JsNumber(Infinity) -> Ok(#("Infinity", state))
+    JsNumber(NegInfinity) -> Ok(#("-Infinity", state))
+    JsBool(True) -> Ok(#("true", state))
+    JsBool(False) -> Ok(#("false", state))
+    JsNull -> Ok(#("null", state))
+    JsUndefined -> Ok(#("undefined", state))
+    JsUninitialized -> Ok(#("undefined", state))
+    JsBigInt(BigInt(n)) -> Ok(#(int.to_string(n), state))
+  }
+}
+
+/// BinOp Add with ToPrimitive for object operands.
+/// ES2024 §13.15.3: ToPrimitive(default) both sides, then string-concat or numeric-add.
+fn binop_add_with_to_primitive(
+  state: State,
+  left: JsValue,
+  right: JsValue,
+  rest: List(JsValue),
+) -> Result(State, #(StepResult, JsValue, Heap)) {
+  case to_primitive(state, left, DefaultHint) {
+    Ok(#(lprim, s1)) ->
+      case to_primitive(s1, right, DefaultHint) {
+        Ok(#(rprim, s2)) ->
+          case lprim, rprim {
+            JsString(a), JsString(b) ->
+              Ok(
+                State(..s2, stack: [JsString(a <> b), ..rest], pc: state.pc + 1),
+              )
+            JsString(a), _ ->
+              case js_to_string(s2, rprim) {
+                Ok(#(b, s3)) ->
+                  Ok(
+                    State(
+                      ..s3,
+                      stack: [JsString(a <> b), ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                Error(#(thrown, s3)) -> Error(#(Thrown, thrown, s3.heap))
+              }
+            _, JsString(b) ->
+              case js_to_string(s2, lprim) {
+                Ok(#(a, s3)) ->
+                  Ok(
+                    State(
+                      ..s3,
+                      stack: [JsString(a <> b), ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                Error(#(thrown, s3)) -> Error(#(Thrown, thrown, s3.heap))
+              }
+            _, _ -> {
+              let a = to_number_for_binop(lprim)
+              let b = to_number_for_binop(rprim)
+              Ok(
+                State(
+                  ..s2,
+                  stack: [JsNumber(num_add(a, b)), ..rest],
+                  pc: state.pc + 1,
+                ),
+              )
+            }
+          }
+        Error(#(thrown, s2)) -> Error(#(Thrown, thrown, s2.heap))
+      }
+    Error(#(thrown, s1)) -> Error(#(Thrown, thrown, s1.heap))
+  }
+}
+
+/// Convert a primitive JsValue to JsNum for arithmetic (ToNumber lite).
+fn to_number_for_binop(val: JsValue) -> JsNum {
+  case to_number(val) {
+    Ok(n) -> n
+    Error(_) -> NaN
+  }
 }
 
 /// JS instanceof operator.
@@ -5606,10 +5877,11 @@ fn compare_values(
       Ok(JsBool(pred(ord)))
     }
     _, _ -> {
-      case to_number(left), to_number(right) {
-        Ok(NaN), _ | _, Ok(NaN) -> Ok(JsBool(False))
-        Ok(a), Ok(b) -> Ok(JsBool(pred(compare_nums(a, b))))
-        Error(e), _ | _, Error(e) -> Error(e)
+      use a <- result.try(to_number(left))
+      use b <- result.try(to_number(right))
+      case a, b {
+        NaN, _ | _, NaN -> Ok(JsBool(False))
+        _, _ -> Ok(JsBool(pred(compare_nums(a, b))))
       }
     }
   }
@@ -5640,32 +5912,6 @@ fn compare_nums(a: JsNum, b: JsNum) -> CompareOrd {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Get element at index from a list. O(n) — will replace with Array later.
-fn list_get(items: List(a), index: Int) -> Result(a, Nil) {
-  case index < 0 {
-    True -> Error(Nil)
-    False ->
-      case items {
-        [] -> Error(Nil)
-        [first, ..] if index == 0 -> Ok(first)
-        [_, ..rest] -> list_get(rest, index - 1)
-      }
-  }
-}
-
-/// Set element at index in a list. O(n).
-fn list_set(items: List(a), index: Int, value: a) -> Result(List(a), Nil) {
-  case items, index {
-    [], _ -> Error(Nil)
-    [_, ..rest], 0 -> Ok([value, ..rest])
-    [first, ..rest], n ->
-      case list_set(rest, n - 1, value) {
-        Ok(new_rest) -> Ok([first, ..new_rest])
-        Error(e) -> Error(e)
-      }
-  }
-}
 
 /// Convert JsNum to int32 (JS ToInt32).
 fn num_to_int32(n: JsNum) -> Int {

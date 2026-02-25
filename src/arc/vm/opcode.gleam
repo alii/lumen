@@ -1,3 +1,4 @@
+import arc/vm/array.{type Array}
 import arc/vm/value.{type JsValue}
 import gleam/option.{type Option}
 
@@ -253,9 +254,9 @@ pub type FuncTemplate {
     name: Option(String),
     arity: Int,
     local_count: Int,
-    bytecode: List(Op),
-    constants: List(JsValue),
-    functions: List(FuncTemplate),
+    bytecode: Array(Op),
+    constants: Array(JsValue),
+    functions: Array(FuncTemplate),
     env_descriptors: List(EnvCapture),
     is_strict: Bool,
     is_arrow: Bool,

@@ -1,19 +1,17 @@
-import arc/vm/builtins/common.{
-  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
-}
+import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/math as builtins_math
+import arc/vm/frame.{type State}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type JsValue, type Ref, Finite, Infinity, JsNumber, JsObject, JsString,
-  JsUndefined, NaN, NativeFunction, NativeIsFinite, NativeIsNaN,
-  NativeNumberConstructor, NativeNumberIsFinite, NativeNumberIsInteger,
-  NativeNumberIsNaN, NativeNumberParseFloat, NativeNumberParseInt,
-  NativeParseFloat, NativeParseInt, NegInfinity, ObjectSlot,
+  type JsValue, type Ref, Finite, Infinity, JsNumber, JsUndefined, NaN,
+  NativeIsFinite, NativeIsNaN, NativeNumberConstructor, NativeNumberIsFinite,
+  NativeNumberIsInteger, NativeNumberIsNaN, NativeNumberParseFloat,
+  NativeNumberParseInt, NativeParseFloat, NativeParseInt, NegInfinity,
 }
-import gleam/dict
 import gleam/float
 import gleam/int
-import gleam/option.{Some}
+import gleam/list
+import gleam/result
 import gleam/string
 
 /// Set up Number constructor + Number.prototype + global parseInt/parseFloat/isNaN/isFinite.
@@ -23,138 +21,117 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType, Ref, Ref, Ref, Ref) {
-  let #(h, number_proto) = alloc_proto(h, Some(object_proto), dict.new())
+  // Static methods on Number constructor
+  let #(h, static_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("isNaN", NativeNumberIsNaN, 1),
+      #("isFinite", NativeNumberIsFinite, 1),
+      #("isInteger", NativeNumberIsInteger, 1),
+      #("parseInt", NativeNumberParseInt, 2),
+      #("parseFloat", NativeNumberParseFloat, 1),
+    ])
 
-  // Number constructor
-  let #(h, ctor_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(NativeNumberConstructor),
-        properties: dict.from_list([
-          #("prototype", value.builtin_property(JsObject(number_proto))),
-          #("name", value.builtin_property(JsString("Number"))),
-          #("length", value.builtin_property(JsNumber(Finite(1.0)))),
-          // Static constants
-          #("NaN", constant_property(JsNumber(NaN))),
-          #("POSITIVE_INFINITY", constant_property(JsNumber(Infinity))),
-          #("NEGATIVE_INFINITY", constant_property(JsNumber(NegInfinity))),
-          #(
-            "MAX_SAFE_INTEGER",
-            constant_property(JsNumber(Finite(9_007_199_254_740_991.0))),
-          ),
-          #(
-            "MIN_SAFE_INTEGER",
-            constant_property(JsNumber(Finite(-9_007_199_254_740_991.0))),
-          ),
-          #(
-            "EPSILON",
-            constant_property(JsNumber(Finite(2.220446049250313e-16))),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ctor_ref)
-  let h = set_constructor(h, number_proto, ctor_ref)
-
-  // Static methods on Number (strict — no coercion)
-  let #(h, nisnan_ref) =
-    alloc_native_fn(h, function_proto, NativeNumberIsNaN, "isNaN", 1)
-  let h = add_method(h, ctor_ref, "isNaN", nisnan_ref)
-
-  let #(h, nisfinite_ref) =
-    alloc_native_fn(h, function_proto, NativeNumberIsFinite, "isFinite", 1)
-  let h = add_method(h, ctor_ref, "isFinite", nisfinite_ref)
-
-  let #(h, nisinteger_ref) =
-    alloc_native_fn(h, function_proto, NativeNumberIsInteger, "isInteger", 1)
-  let h = add_method(h, ctor_ref, "isInteger", nisinteger_ref)
-
-  // Number.parseInt/parseFloat are the same as global ones per spec
-  let #(h, nparseint_ref) =
-    alloc_native_fn(h, function_proto, NativeNumberParseInt, "parseInt", 2)
-  let h = add_method(h, ctor_ref, "parseInt", nparseint_ref)
-
-  let #(h, nparsefloat_ref) =
-    alloc_native_fn(h, function_proto, NativeNumberParseFloat, "parseFloat", 1)
-  let h = add_method(h, ctor_ref, "parseFloat", nparsefloat_ref)
+  // Static constants
+  let constants = [
+    #("NaN", value.data(JsNumber(NaN))),
+    #("POSITIVE_INFINITY", value.data(JsNumber(Infinity))),
+    #("NEGATIVE_INFINITY", value.data(JsNumber(NegInfinity))),
+    #("MAX_SAFE_INTEGER", value.data(JsNumber(Finite(9_007_199_254_740_991.0)))),
+    #(
+      "MIN_SAFE_INTEGER",
+      value.data(JsNumber(Finite(-9_007_199_254_740_991.0))),
+    ),
+    #("EPSILON", value.data(JsNumber(Finite(2.220446049250313e-16)))),
+  ]
 
   // Global utility functions (separate refs — these are standalone globals)
   let #(h, parse_int_ref) =
-    alloc_native_fn(h, function_proto, NativeParseInt, "parseInt", 2)
+    common.alloc_native_fn(h, function_proto, NativeParseInt, "parseInt", 2)
   let #(h, parse_float_ref) =
-    alloc_native_fn(h, function_proto, NativeParseFloat, "parseFloat", 1)
+    common.alloc_native_fn(h, function_proto, NativeParseFloat, "parseFloat", 1)
   let #(h, is_nan_ref) =
-    alloc_native_fn(h, function_proto, NativeIsNaN, "isNaN", 1)
+    common.alloc_native_fn(h, function_proto, NativeIsNaN, "isNaN", 1)
   let #(h, is_finite_ref) =
-    alloc_native_fn(h, function_proto, NativeIsFinite, "isFinite", 1)
+    common.alloc_native_fn(h, function_proto, NativeIsFinite, "isFinite", 1)
 
-  #(
-    h,
-    BuiltinType(prototype: number_proto, constructor: ctor_ref),
-    parse_int_ref,
-    parse_float_ref,
-    is_nan_ref,
-    is_finite_ref,
-  )
+  let ctor_props = list.append(constants, static_methods)
+  let #(h, bt) =
+    common.init_type(
+      h,
+      object_proto,
+      function_proto,
+      [],
+      fn(_) { NativeNumberConstructor },
+      "Number",
+      1,
+      ctor_props,
+    )
+
+  #(h, bt, parse_int_ref, parse_float_ref, is_nan_ref, is_finite_ref)
 }
 
 /// Number() called as a function — type coercion to number.
 pub fn call_as_function(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let result = case args {
     [] -> JsNumber(Finite(0.0))
     [val, ..] -> JsNumber(builtins_math.to_number(val))
   }
-  #(heap, Ok(result))
+  #(state, Ok(result))
 }
 
 /// Global parseInt(string, radix?)
 pub fn parse_int(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let str = case args {
-    [val, ..] -> string.trim(value.to_js_string(val))
-    [] -> ""
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let str_result = case args {
+    [val, ..] -> {
+      use #(s, state) <- result.map(frame.to_string(state, val))
+      #(string.trim(s), state)
+    }
+    [] -> Ok(#("", state))
   }
-  let radix = case args {
-    [_, r, ..] ->
-      case builtins_math.to_number(r) {
-        Finite(n) -> {
-          let r = float.truncate(n)
-          case r == 0 {
-            True -> 10
-            False -> r
+  case str_result {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(str, state)) -> {
+      let radix = case args {
+        [_, r, ..] ->
+          case builtins_math.to_number(r) {
+            Finite(n) -> {
+              let r = float.truncate(n)
+              case r == 0 {
+                True -> 10
+                False -> r
+              }
+            }
+            _ -> 10
           }
-        }
         _ -> 10
       }
-    _ -> 10
-  }
-  // Handle 0x prefix for hex
-  let #(str, radix) = case radix {
-    16 ->
-      case string.starts_with(str, "0x") || string.starts_with(str, "0X") {
-        True -> #(string.drop_start(str, 2), 16)
-        False -> #(str, 16)
+      // Handle 0x prefix for hex
+      let #(str, radix) = case radix {
+        16 ->
+          case string.starts_with(str, "0x") || string.starts_with(str, "0X") {
+            True -> #(string.drop_start(str, 2), 16)
+            False -> #(str, 16)
+          }
+        10 ->
+          case string.starts_with(str, "0x") || string.starts_with(str, "0X") {
+            True -> #(string.drop_start(str, 2), 16)
+            False -> #(str, 10)
+          }
+        _ -> #(str, radix)
       }
-    10 ->
-      case string.starts_with(str, "0x") || string.starts_with(str, "0X") {
-        True -> #(string.drop_start(str, 2), 16)
-        False -> #(str, 10)
+      case radix >= 2 && radix <= 36 {
+        False -> #(state, Ok(JsNumber(NaN)))
+        True -> {
+          let result = parse_int_digits(str, radix)
+          #(state, Ok(JsNumber(result)))
+        }
       }
-    _ -> #(str, radix)
-  }
-  case radix >= 2 && radix <= 36 {
-    False -> #(heap, Ok(JsNumber(NaN)))
-    True -> {
-      let result = parse_int_digits(str, radix)
-      #(heap, Ok(JsNumber(result)))
     }
   }
 }
@@ -162,22 +139,29 @@ pub fn parse_int(
 /// Global parseFloat(string)
 pub fn parse_float(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let str = case args {
-    [val, ..] -> string.trim(value.to_js_string(val))
-    [] -> ""
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let str_result = case args {
+    [val, ..] -> {
+      use #(s, state) <- result.map(frame.to_string(state, val))
+      #(string.trim(s), state)
+    }
+    [] -> Ok(#("", state))
   }
-  case str {
-    "Infinity" | "+Infinity" -> #(heap, Ok(JsNumber(Infinity)))
-    "-Infinity" -> #(heap, Ok(JsNumber(NegInfinity)))
-    _ ->
-      case gleam_stdlib_parse_float(str) {
-        Ok(n) -> #(heap, Ok(JsNumber(Finite(n))))
-        Error(_) ->
-          case int.parse(str) {
-            Ok(n) -> #(heap, Ok(JsNumber(Finite(int.to_float(n)))))
-            Error(_) -> #(heap, Ok(JsNumber(NaN)))
+  case str_result {
+    Error(#(thrown, state)) -> #(state, Error(thrown))
+    Ok(#(str, state)) ->
+      case str {
+        "Infinity" | "+Infinity" -> #(state, Ok(JsNumber(Infinity)))
+        "-Infinity" -> #(state, Ok(JsNumber(NegInfinity)))
+        _ ->
+          case gleam_stdlib_parse_float(str) {
+            Ok(n) -> #(state, Ok(JsNumber(Finite(n))))
+            Error(_) ->
+              case int.parse(str) {
+                Ok(n) -> #(state, Ok(JsNumber(Finite(int.to_float(n)))))
+                Error(_) -> #(state, Ok(JsNumber(NaN)))
+              }
           }
       }
   }
@@ -186,8 +170,8 @@ pub fn parse_float(
 /// Global isNaN(value) — coerces to number first, then checks NaN.
 pub fn js_is_nan(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let val = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -197,14 +181,14 @@ pub fn js_is_nan(
     NaN -> value.JsBool(True)
     _ -> value.JsBool(False)
   }
-  #(heap, Ok(result))
+  #(state, Ok(result))
 }
 
 /// Global isFinite(value) — coerces to number first, then checks finiteness.
 pub fn js_is_finite(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let val = case args {
     [v, ..] -> v
     [] -> JsUndefined
@@ -214,40 +198,40 @@ pub fn js_is_finite(
     Finite(_) -> value.JsBool(True)
     _ -> value.JsBool(False)
   }
-  #(heap, Ok(result))
+  #(state, Ok(result))
 }
 
 /// Number.isNaN(value) — strict: returns true ONLY if value is a number AND is NaN.
 /// Unlike global isNaN(), does NOT coerce the argument.
 pub fn number_is_nan(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let result = case args {
     [JsNumber(NaN), ..] -> value.JsBool(True)
     _ -> value.JsBool(False)
   }
-  #(heap, Ok(result))
+  #(state, Ok(result))
 }
 
 /// Number.isFinite(value) — strict: returns true ONLY if value is a finite number.
 /// Unlike global isFinite(), does NOT coerce the argument.
 pub fn number_is_finite(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let result = case args {
     [JsNumber(Finite(_)), ..] -> value.JsBool(True)
     _ -> value.JsBool(False)
   }
-  #(heap, Ok(result))
+  #(state, Ok(result))
 }
 
 /// Number.isInteger(value) — returns true if value is a finite number with no fractional part.
 pub fn number_is_integer(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   let result = case args {
     [JsNumber(Finite(n)), ..] -> {
       let truncated = int.to_float(float.truncate(n))
@@ -255,7 +239,7 @@ pub fn number_is_integer(
     }
     _ -> value.JsBool(False)
   }
-  #(heap, Ok(result))
+  #(state, Ok(result))
 }
 
 // ============================================================================
@@ -347,59 +331,6 @@ fn digit_value(ch: String) -> Result(Int, Nil) {
     "y" | "Y" -> Ok(34)
     "z" | "Z" -> Ok(35)
     _ -> Error(Nil)
-  }
-}
-
-fn constant_property(val: JsValue) -> value.Property {
-  value.DataProperty(
-    value: val,
-    writable: False,
-    enumerable: False,
-    configurable: False,
-  )
-}
-
-/// Allocate a native function object on the heap, root it, and return the ref.
-fn alloc_native_fn(
-  h: Heap,
-  function_proto: Ref,
-  native: value.NativeFn,
-  name: String,
-  length: Int,
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(native),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(JsNumber(Finite(int.to_float(length)))),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Add a non-enumerable method property to an object on the heap.
-fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
   }
 }
 

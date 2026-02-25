@@ -1,4 +1,5 @@
 import arc/vm/heap
+import arc/vm/js_elements
 import arc/vm/value.{
   ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FunctionObject, JsBigInt,
   JsNull, JsNumber, JsObject, JsString, JsSymbol, ObjectSlot, OrdinaryObject,
@@ -12,7 +13,8 @@ fn ordinary(props: dict.Dict(String, value.JsValue)) {
   ObjectSlot(
     kind: OrdinaryObject,
     properties: dict.map_values(props, fn(_, v) { value.data_property(v) }),
-    elements: dict.new(),
+    symbol_properties: dict.new(),
+    elements: js_elements.new(),
     prototype: None,
   )
 }
@@ -189,10 +191,11 @@ pub fn gc_traces_through_array_slot_test() {
       ObjectSlot(
         kind: ArrayObject(3),
         properties: dict.new(),
-        elements: dict.from_list([
-          #(0, JsNumber(Finite(1.0))),
-          #(1, JsObject(ref_inner)),
-          #(2, JsNull),
+        symbol_properties: dict.new(),
+        elements: js_elements.from_list([
+          JsNumber(Finite(1.0)),
+          JsObject(ref_inner),
+          JsNull,
         ]),
         prototype: None,
       ),
@@ -214,7 +217,8 @@ pub fn gc_traces_through_closure_slot_test() {
       ObjectSlot(
         kind: FunctionObject(func_index: 0, env: ref_env),
         properties: dict.new(),
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: None,
       ),
     )
@@ -247,7 +251,8 @@ pub fn mixed_live_dead_partition_test() {
       ObjectSlot(
         kind: ArrayObject(1),
         properties: dict.new(),
-        elements: dict.from_list([#(0, JsNumber(Finite(1.0)))]),
+        symbol_properties: dict.new(),
+        elements: js_elements.from_list([JsNumber(Finite(1.0))]),
         prototype: None,
       ),
     )
@@ -261,7 +266,8 @@ pub fn mixed_live_dead_partition_test() {
       ObjectSlot(
         kind: FunctionObject(func_index: 1, env: live_env),
         properties: dict.new(),
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: None,
       ),
     )
@@ -305,7 +311,8 @@ pub fn gc_traces_through_function_object_test() {
       ObjectSlot(
         kind: FunctionObject(func_index: 0, env: ref_env),
         properties: dict.new(),
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: None,
       ),
     )
@@ -331,7 +338,8 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
       ObjectSlot(
         kind: FunctionObject(func_index: 0, env: ref_env),
         properties: dict.new(),
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: None,
       ),
     )
@@ -341,7 +349,8 @@ pub fn shared_env_both_closures_keep_it_alive_test() {
       ObjectSlot(
         kind: FunctionObject(func_index: 1, env: ref_env),
         properties: dict.new(),
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: None,
       ),
     )
@@ -367,7 +376,8 @@ pub fn gc_traces_through_box_slot_test() {
       ObjectSlot(
         kind: FunctionObject(func_index: 0, env: ref_env),
         properties: dict.new(),
-        elements: dict.new(),
+        symbol_properties: dict.new(),
+        elements: js_elements.new(),
         prototype: None,
       ),
     )

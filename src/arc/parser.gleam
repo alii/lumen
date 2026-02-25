@@ -589,10 +589,8 @@ type P {
 fn set_not_assignable(
   res: Result(#(P, ast.Expression), ParseError),
 ) -> Result(#(P, ast.Expression), ParseError) {
-  result.map(res, fn(pair) {
-    let #(p, expr) = pair
-    #(P(..p, last_expr_assignable: False, last_expr_is_assignment: False), expr)
-  })
+  use #(p, expr) <- result.map(res)
+  #(P(..p, last_expr_assignable: False, last_expr_is_assignment: False), expr)
 }
 
 /// Adapter: extract just P from an expression result.
@@ -600,7 +598,8 @@ fn set_not_assignable(
 fn expr_p(
   res: Result(#(P, ast.Expression), ParseError),
 ) -> Result(P, ParseError) {
-  result.map(res, fn(pair) { pair.0 })
+  use #(p, _) <- result.map(res)
+  p
 }
 
 /// Convert a declaration statement to an expression for export default.
@@ -691,7 +690,7 @@ fn parse_script(p: P) -> Result(ast.Program, ParseError) {
 
 fn parse_module(p: P) -> Result(ast.Program, ParseError) {
   use #(p_final, items) <- result.try(parse_module_body(p, []))
-  use _ <- result.try(validate_export_local_refs(p_final))
+  use Nil <- result.try(validate_export_local_refs(p_final))
   Ok(ast.Module(body: items))
 }
 
@@ -1026,7 +1025,7 @@ fn validate_and_register_binding(
   p: P,
   val: String,
 ) -> Result(#(P, ast.Pattern), ParseError) {
-  use _ <- result.try(check_binding_identifier(p, val))
+  use Nil <- result.try(check_binding_identifier(p, val))
   use p <- result.try(check_duplicate_binding(p, val))
   use p <- result.try(accumulate_param_name(p, val))
   use p <- result.try(register_scope_binding(p, val))
@@ -1042,7 +1041,7 @@ fn validate_and_register_binding_no_advance(
   scope_p: P,
   val: String,
 ) -> Result(#(P, ast.Pattern), ParseError) {
-  use _ <- result.try(check_binding_identifier(check_p, val))
+  use Nil <- result.try(check_binding_identifier(check_p, val))
   use p <- result.try(check_duplicate_binding(scope_p, val))
   use p <- result.try(accumulate_param_name(p, val))
   use p <- result.try(register_scope_binding(p, val))
@@ -1455,21 +1454,22 @@ fn parse_object_binding_property(
             p2,
             prop_name,
           ))
-          case parse_assignment_expression(advance(p2c)) {
-            Ok(#(p3, default_expr)) ->
-              Ok(#(
-                p3,
-                ast.PatternProperty(
-                  key: key_expr,
-                  value: ast.AssignmentPattern(
-                    left: ast.IdentifierPattern(name: prop_name),
-                    right: default_expr,
-                  ),
-                  computed: False,
-                  shorthand: True,
+          {
+            use #(p3, default_expr) <- result.map(
+              parse_assignment_expression(advance(p2c)),
+            )
+            #(
+              p3,
+              ast.PatternProperty(
+                key: key_expr,
+                value: ast.AssignmentPattern(
+                  left: ast.IdentifierPattern(name: prop_name),
+                  right: default_expr,
                 ),
-              ))
-            Error(err) -> Error(err)
+                computed: False,
+                shorthand: True,
+              ),
+            )
           }
         }
       }
@@ -1661,23 +1661,21 @@ fn parse_for_declaration_scoped(
       in_block: True,
     )
   // After parsing, restore the original scope from p (immutable -- no saving needed)
-  result.map(parse_for_declaration(p2, is_await), fn(pair) {
-    let #(p3, stmt) = pair
-    #(
-      P(
-        ..p3,
-        scope_lexical: p.scope_lexical,
-        scope_var: p.scope_var,
-        scope_funcs: p.scope_funcs,
-        outer_lexical: p.outer_lexical,
-        in_block: p.in_block,
-        in_lexical_decl: p.in_lexical_decl,
-        decl_bound_names: p.decl_bound_names,
-        binding_kind: p.binding_kind,
-      ),
-      stmt,
-    )
-  })
+  use #(p3, stmt) <- result.map(parse_for_declaration(p2, is_await))
+  #(
+    P(
+      ..p3,
+      scope_lexical: p.scope_lexical,
+      scope_var: p.scope_var,
+      scope_funcs: p.scope_funcs,
+      outer_lexical: p.outer_lexical,
+      in_block: p.in_block,
+      in_lexical_decl: p.in_lexical_decl,
+      decl_bound_names: p.decl_bound_names,
+      binding_kind: p.binding_kind,
+    ),
+    stmt,
+  )
 }
 
 fn parse_for_declaration(
@@ -1718,7 +1716,7 @@ fn parse_for_declaration(
     }
     Of -> {
       // B.3.4: for-of var bindings must not shadow catch parameters
-      use _ <- result.try(case kind {
+      use Nil <- result.try(case kind {
         Var ->
           check_new_vars_vs_params(
             p3.scope_var,
@@ -2111,8 +2109,10 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
                   RightParen,
                 ))
                 // Use function_body_block to NOT create another scope
-                result.map(parse_function_body_block(p7), fn(pair) {
-                  let #(p8, catch_body) = pair
+                {
+                  use #(p8, catch_body) <- result.map(parse_function_body_block(
+                    p7,
+                  ))
                   #(
                     P(
                       ..p8,
@@ -2129,7 +2129,7 @@ fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
                       body: catch_body,
                     )),
                   )
-                })
+                }
               }
             {
               Ok(catch_result) -> catch_result
@@ -2393,8 +2393,8 @@ fn parse_function_params_and_body(
   use p5 <- result.try(check_use_strict_in_body(p4))
   use #(p6, body) <- result.try(case !was_strict && p5.strict {
     True -> {
-      use _ <- result.try(check_pending_strict_names(p5))
-      use _ <- result.try(check_param_names_for_dups(p5))
+      use Nil <- result.try(check_pending_strict_names(p5))
+      use Nil <- result.try(check_param_names_for_dups(p5))
       parse_function_body_block(p5)
     }
     False -> parse_function_body_block(p5)
@@ -2461,7 +2461,7 @@ fn check_param_names_list(
 fn mark_non_simple_params(p: P) -> Result(P, ParseError) {
   let p = P(..p, has_non_simple_param: True)
   // Retroactively check accumulated names for duplicates
-  use _ <- result.try(check_param_names_for_dups_only(p))
+  use Nil <- result.try(check_param_names_for_dups_only(p))
   Ok(p)
 }
 
@@ -2596,7 +2596,7 @@ fn parse_formal_parameter_list(
       use p <- result.try(mark_non_simple_params(p))
       let p2 = advance(p)
       let param_name = get_simple_binding_name(p2)
-      use _ <- result.try(check_duplicate_param(p2, param_name, seen))
+      use Nil <- result.try(check_duplicate_param(p2, param_name, seen))
       use #(p3, inner_pat) <- result.try(parse_binding_pattern(p2))
       // Rest cannot have default
       case peek(p3) {
@@ -2630,7 +2630,7 @@ fn parse_formal_param_after_dup_check(
   seen: List(String),
   acc: List(ast.Pattern),
 ) -> Result(#(P, List(ast.Pattern)), ParseError) {
-  use _ <- result.try(check_duplicate_param(p, param_name, seen))
+  use Nil <- result.try(check_duplicate_param(p, param_name, seen))
   let new_seen = case param_name {
     "" -> seen
     name -> [name, ..seen]
@@ -2766,7 +2766,10 @@ fn parse_class_decl_impl(
   case is_name {
     True -> {
       let name = peek_value(p2)
-      use _ <- result.try(check_binding_identifier(P(..p2, strict: True), name))
+      use Nil <- result.try(check_binding_identifier(
+        P(..p2, strict: True),
+        name,
+      ))
       use p3 <- result.try(register_class_name(p2, name, pos_of(p2)))
       use #(p4, super_class, body) <- result.try(parse_class_tail(advance(p3)))
       Ok(#(
@@ -3142,13 +3145,11 @@ fn parse_labeled_statement_body(
     let outer_labels = p3.label_set
     let p3 = P(..p3, label_set: [#(label, is_loop), ..p3.label_set])
     let wrap_label = fn(res) {
-      result.map(res, fn(pair) {
-        let #(inner_p, stmt) = pair
-        #(
-          P(..inner_p, label_set: outer_labels),
-          ast.LabeledStatement(label:, body: stmt),
-        )
-      })
+      use #(inner_p, stmt) <- result.map(res)
+      #(
+        P(..inner_p, label_set: outer_labels),
+        ast.LabeledStatement(label:, body: stmt),
+      )
     }
     // Check for labeled generator declarations (always forbidden),
     // labeled lexical declarations (always forbidden),
@@ -3496,7 +3497,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
             Arrow -> {
               // Check identifier is valid as a binding name
               let name = peek_value_at(p, 1)
-              use _ <- result.try(check_binding_identifier(p, name))
+              use Nil <- result.try(check_binding_identifier(p, name))
               {
                 // advance past async + ident to land on Arrow
                 let p2 = advance(advance(p))
@@ -3534,7 +3535,7 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ParseError) {
         Arrow -> {
           // Check identifier is valid as a binding name (eval/arguments/etc)
           let name = peek_value(p)
-          use _ <- result.try(check_binding_identifier(p, name))
+          use Nil <- result.try(check_binding_identifier(p, name))
           {
             let p2 = advance(p)
             // Check for line break before =>
@@ -4529,14 +4530,11 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       ))
     TemplateLiteral -> {
       let raw = peek_value(p)
-      case parse_template_raw(p, raw) {
-        Ok(#(quasis, expressions)) ->
-          Ok(#(
-            P(..advance(p), last_expr_assignable: False),
-            ast.TemplateLiteral(quasis:, expressions:),
-          ))
-        Error(e) -> Error(e)
-      }
+      use #(quasis, expressions) <- result.map(parse_template_raw(p, raw))
+      #(
+        P(..advance(p), last_expr_assignable: False),
+        ast.TemplateLiteral(quasis:, expressions:),
+      )
     }
     This ->
       Ok(#(P(..advance(p), last_expr_assignable: False), ast.ThisExpression))
@@ -5202,7 +5200,7 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
       use #(flags_end, flags) <- result.try(skip_regex_flags(p.bytes, end_pos))
       // If /u flag is present, validate no lone braces in the body
       // body is from body_start to end_pos - 1 (exclusive of closing /)
-      use _ <- result.try(case list_contains(flags, "u") {
+      use Nil <- result.try(case list_contains(flags, "u") {
         True ->
           validate_regex_unicode_body(p.bytes, body_start, end_pos - 1)
           |> result.map_error(fn(msg) {
@@ -5916,7 +5914,7 @@ fn parse_import_specifier(p: P) -> Result(#(P, ast.ImportSpecifier), ParseError)
           // The alias is the local binding name — must be a valid binding identifier
           let binding_name = peek_value(p3)
           let binding_kind = peek(p3)
-          use _ <- result.try(check_import_binding_name(
+          use Nil <- result.try(check_import_binding_name(
             p3,
             binding_name,
             binding_kind,
@@ -5933,7 +5931,7 @@ fn parse_import_specifier(p: P) -> Result(#(P, ast.ImportSpecifier), ParseError)
         }
         _ -> {
           // No alias: the original name is the local binding — must be valid
-          use _ <- result.try(check_import_binding_name(
+          use Nil <- result.try(check_import_binding_name(
             p,
             original_name,
             original_kind,
@@ -6317,7 +6315,7 @@ fn scan_directive_prologue(
       let val = peek_value_at(p, offset)
       case val {
         "use strict" -> {
-          use _ <- result.try(check_retroactive_octals(p, seen_strings))
+          use Nil <- result.try(check_retroactive_octals(p, seen_strings))
           let p = P(..p, strict: True)
           check_retroactive_params(p)
         }
@@ -6446,10 +6444,8 @@ fn restore_context_fn(
   res: Result(#(P, List(ast.Pattern), ast.Statement), ParseError),
   outer: P,
 ) -> Result(#(P, List(ast.Pattern), ast.Statement), ParseError) {
-  result.map(res, fn(triple) {
-    let #(p, params, stmt) = triple
-    #(restore_outer_context(p, outer), params, stmt)
-  })
+  use #(p, params, stmt) <- result.map(res)
+  #(restore_outer_context(p, outer), params, stmt)
 }
 
 fn restore_outer_context(p: P, outer: P) -> P {
@@ -6592,10 +6588,8 @@ fn parse_template_raw(
               last_expr_assignable: False,
               last_expr_is_assignment: False,
             )
-          case parse_expression(sub_p) {
-            Ok(#(_, expr)) -> Ok(expr)
-            Error(e) -> Error(e)
-          }
+          use #(_, expr) <- result.map(parse_expression(sub_p))
+          expr
         }
       }
     }),
@@ -6860,7 +6854,7 @@ fn eat_optional_name(p: P) -> Result(P, ParseError) {
   case is_name {
     True -> {
       let name = peek_value(p)
-      use _ <- result.try(check_binding_identifier(p, name))
+      use Nil <- result.try(check_binding_identifier(p, name))
       Ok(advance(p))
     }
     False -> Ok(p)

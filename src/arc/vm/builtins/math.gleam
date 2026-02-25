@@ -1,60 +1,65 @@
+import arc/vm/builtins/common
+import arc/vm/builtins/helpers
+import arc/vm/frame.{type State}
 import arc/vm/heap.{type Heap}
+import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type Ref, Finite, Infinity, JsNumber, JsObject, JsString, NaN,
-  NativeFunction, NativeMathAbs, NativeMathCeil, NativeMathCos, NativeMathFloor,
-  NativeMathLog, NativeMathMax, NativeMathMin, NativeMathPow, NativeMathRound,
-  NativeMathSin, NativeMathSqrt, NativeMathTrunc, NegInfinity, ObjectSlot,
-  OrdinaryObject,
+  type JsValue, type Ref, Finite, Infinity, JsNumber, JsString, NaN,
+  NativeMathAbs, NativeMathCeil, NativeMathCos, NativeMathFloor, NativeMathLog,
+  NativeMathMax, NativeMathMin, NativeMathPow, NativeMathRound, NativeMathSin,
+  NativeMathSqrt, NativeMathTrunc, NegInfinity, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{Some}
 
 /// Set up the Math global object.
 /// Math is NOT a constructor — it's a plain object with static methods.
 pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
-  // Allocate Math as a plain ordinary object
+  let constants = [
+    #("PI", value.data(JsNumber(Finite(3.141592653589793)))),
+    #("E", value.data(JsNumber(Finite(2.718281828459045)))),
+  ]
+
+  let #(h, methods) =
+    common.alloc_methods(h, function_proto, [
+      #("pow", NativeMathPow, 2),
+      #("abs", NativeMathAbs, 1),
+      #("floor", NativeMathFloor, 1),
+      #("ceil", NativeMathCeil, 1),
+      #("round", NativeMathRound, 1),
+      #("trunc", NativeMathTrunc, 1),
+      #("sqrt", NativeMathSqrt, 1),
+      #("max", NativeMathMax, 2),
+      #("min", NativeMathMin, 2),
+      #("log", NativeMathLog, 1),
+      #("sin", NativeMathSin, 1),
+      #("cos", NativeMathCos, 1),
+    ])
+
+  let properties = dict.from_list(list.append(methods, constants))
+  let symbol_properties =
+    dict.from_list([
+      #(
+        value.symbol_to_string_tag,
+        value.data(JsString("Math")) |> value.configurable(),
+      ),
+    ])
+
   let #(h, math_ref) =
     heap.alloc(
       h,
       ObjectSlot(
         kind: OrdinaryObject,
-        properties: dict.new(),
-        elements: dict.new(),
+        properties:,
+        elements: js_elements.new(),
         prototype: Some(object_proto),
+        symbol_properties:,
       ),
     )
   let h = heap.root(h, math_ref)
-
-  // Add all Math methods
-  let methods = [
-    #("pow", NativeMathPow, 2),
-    #("abs", NativeMathAbs, 1),
-    #("floor", NativeMathFloor, 1),
-    #("ceil", NativeMathCeil, 1),
-    #("round", NativeMathRound, 1),
-    #("trunc", NativeMathTrunc, 1),
-    #("sqrt", NativeMathSqrt, 1),
-    #("max", NativeMathMax, 2),
-    #("min", NativeMathMin, 2),
-    #("log", NativeMathLog, 1),
-    #("sin", NativeMathSin, 1),
-    #("cos", NativeMathCos, 1),
-  ]
-
-  let h =
-    list.fold(methods, h, fn(h, method) {
-      let #(name, native, length) = method
-      let #(h, fn_ref) =
-        alloc_native_fn(h, function_proto, native, name, length)
-      add_method(h, math_ref, name, fn_ref)
-    })
-
-  // Add Math constants (non-enumerable, non-writable, non-configurable)
-  let h = add_constant(h, math_ref, "PI", JsNumber(Finite(3.141592653589793)))
-  let h = add_constant(h, math_ref, "E", JsNumber(Finite(2.718281828459045)))
 
   #(h, math_ref)
 }
@@ -66,125 +71,102 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
 /// Math.pow(base, exponent)
 pub fn math_pow(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let base = get_num_arg(args, 0)
-  let exponent = get_num_arg(args, 1)
-  #(heap, Ok(JsNumber(num_exp(base, exponent))))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let base = helpers.get_num_arg(args, 0, to_number)
+  let exponent = helpers.get_num_arg(args, 1, to_number)
+  #(state, Ok(JsNumber(num_exp(base, exponent))))
 }
 
 /// Math.abs(x)
 pub fn math_abs(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  case x {
     Finite(n) -> Finite(float.absolute_value(n))
     NaN -> NaN
-    Infinity -> Infinity
-    NegInfinity -> Infinity
+    Infinity | NegInfinity -> Infinity
   }
-  #(heap, Ok(JsNumber(result)))
 }
 
 /// Math.floor(x)
 pub fn math_floor(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
-    Finite(n) -> Finite(ffi_math_floor(n))
-    other -> other
-  }
-  #(heap, Ok(JsNumber(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  finite_passthrough(x, ffi_math_floor)
 }
 
 /// Math.ceil(x)
 pub fn math_ceil(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
-    Finite(n) -> Finite(ffi_math_ceil(n))
-    other -> other
-  }
-  #(heap, Ok(JsNumber(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  finite_passthrough(x, ffi_math_ceil)
 }
 
 /// Math.round(x) — JS round: round half toward +Infinity (NOT banker's rounding)
 pub fn math_round(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
-    Finite(n) -> Finite(js_round(n))
-    other -> other
-  }
-  #(heap, Ok(JsNumber(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  finite_passthrough(x, js_round)
 }
 
 /// Math.trunc(x)
 pub fn math_trunc(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
-    Finite(n) -> Finite(int.to_float(float_to_int(n)))
-    other -> other
-  }
-  #(heap, Ok(JsNumber(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  finite_passthrough(x, fn(n) { int.to_float(value.float_to_int(n)) })
 }
 
 /// Math.sqrt(x)
 pub fn math_sqrt(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  case x {
     Finite(n) ->
       case n <. 0.0 {
         True -> NaN
         False -> Finite(ffi_math_sqrt(n))
       }
-    NaN -> NaN
+    NaN | NegInfinity -> NaN
     Infinity -> Infinity
-    NegInfinity -> NaN
   }
-  #(heap, Ok(JsNumber(result)))
 }
 
 /// Math.max(a, b, ...)
 pub fn math_max(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case args {
-    [] -> #(heap, Ok(JsNumber(NegInfinity)))
+    [] -> #(state, Ok(JsNumber(NegInfinity)))
     _ -> {
       let result =
         list.fold(args, NegInfinity, fn(acc, arg) {
           let n = to_number(arg)
           case acc, n {
-            NaN, _ -> NaN
-            _, NaN -> NaN
+            NaN, _ | _, NaN -> NaN
             Finite(a), Finite(b) ->
               case a >=. b {
                 True -> Finite(a)
                 False -> Finite(b)
               }
-            Infinity, _ -> Infinity
-            _, Infinity -> Infinity
-            NegInfinity, other -> other
-            other, NegInfinity -> other
+            Infinity, _ | _, Infinity -> Infinity
+            NegInfinity, other | other, NegInfinity -> other
           }
         })
-      #(heap, Ok(JsNumber(result)))
+      #(state, Ok(JsNumber(result)))
     }
   }
 }
@@ -192,29 +174,26 @@ pub fn math_max(
 /// Math.min(a, b, ...)
 pub fn math_min(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
   case args {
-    [] -> #(heap, Ok(JsNumber(Infinity)))
+    [] -> #(state, Ok(JsNumber(Infinity)))
     _ -> {
       let result =
         list.fold(args, Infinity, fn(acc, arg) {
           let n = to_number(arg)
           case acc, n {
-            NaN, _ -> NaN
-            _, NaN -> NaN
+            NaN, _ | _, NaN -> NaN
             Finite(a), Finite(b) ->
               case a <=. b {
                 True -> Finite(a)
                 False -> Finite(b)
               }
-            NegInfinity, _ -> NegInfinity
-            _, NegInfinity -> NegInfinity
-            Infinity, other -> other
-            other, Infinity -> other
+            NegInfinity, _ | _, NegInfinity -> NegInfinity
+            Infinity, other | other, Infinity -> other
           }
         })
-      #(heap, Ok(JsNumber(result)))
+      #(state, Ok(JsNumber(result)))
     }
   }
 }
@@ -222,10 +201,10 @@ pub fn math_min(
 /// Math.log(x)
 pub fn math_log(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  case x {
     Finite(n) ->
       case n <. 0.0 {
         True -> NaN
@@ -235,42 +214,58 @@ pub fn math_log(
             False -> Finite(ffi_math_log(n))
           }
       }
-    NaN -> NaN
+    NaN | NegInfinity -> NaN
     Infinity -> Infinity
-    NegInfinity -> NaN
   }
-  #(heap, Ok(JsNumber(result)))
 }
 
 /// Math.sin(x)
 pub fn math_sin(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
-    Finite(n) -> Finite(ffi_math_sin(n))
-    _ -> NaN
-  }
-  #(heap, Ok(JsNumber(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  finite_or_nan(x, ffi_math_sin)
 }
 
 /// Math.cos(x)
 pub fn math_cos(
   args: List(JsValue),
-  heap: Heap,
-) -> #(Heap, Result(JsValue, JsValue)) {
-  let x = get_num_arg(args, 0)
-  let result = case x {
-    Finite(n) -> Finite(ffi_math_cos(n))
-    _ -> NaN
-  }
-  #(heap, Ok(JsNumber(result)))
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  use x <- math_unary(args, state)
+  finite_or_nan(x, ffi_math_cos)
 }
 
 // ============================================================================
 // Internal helpers
 // ============================================================================
+
+/// Apply a unary JsNum->JsNum function to the first arg.
+fn math_unary(
+  args: List(JsValue),
+  state: State,
+  apply: fn(value.JsNum) -> value.JsNum,
+) -> #(State, Result(JsValue, JsValue)) {
+  let x = helpers.get_num_arg(args, 0, to_number)
+  #(state, Ok(JsNumber(apply(x))))
+}
+
+/// For ops where Finite(n) -> Finite(f(n)) and non-finite passes through.
+fn finite_passthrough(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
+  case x {
+    Finite(n) -> Finite(f(n))
+    other -> other
+  }
+}
+
+/// For ops where Finite(n) -> Finite(f(n)) and anything else is NaN.
+fn finite_or_nan(x: value.JsNum, f: fn(Float) -> Float) -> value.JsNum {
+  case x {
+    Finite(n) -> Finite(f(n))
+    _ -> NaN
+  }
+}
 
 /// Simplified ToNumber for Math operations.
 pub fn to_number(val: JsValue) -> value.JsNum {
@@ -296,22 +291,6 @@ pub fn to_number(val: JsValue) -> value.JsNum {
   }
 }
 
-/// Get numeric arg at position, defaulting to NaN if missing.
-fn get_num_arg(args: List(JsValue), idx: Int) -> value.JsNum {
-  case list_at(args, idx) {
-    Some(v) -> to_number(v)
-    None -> NaN
-  }
-}
-
-fn list_at(lst: List(a), idx: Int) -> option.Option(a) {
-  case idx, lst {
-    0, [x, ..] -> Some(x)
-    n, [_, ..rest] -> list_at(rest, n - 1)
-    _, [] -> None
-  }
-}
-
 /// JS Math.round: round half toward +Infinity.
 /// Math.round(-0.5) → 0, Math.round(0.5) → 1
 fn js_round(n: Float) -> Float {
@@ -319,13 +298,6 @@ fn js_round(n: Float) -> Float {
   case n -. floored >=. 0.5 {
     True -> floored +. 1.0
     False -> floored
-  }
-}
-
-fn float_to_int(f: Float) -> Int {
-  case f <. 0.0 {
-    True -> 0 - float.truncate(float.negate(f))
-    False -> float.truncate(f)
   }
 }
 
@@ -386,70 +358,4 @@ fn gleam_stdlib_parse_float(s: String) -> Result(Float, Nil)
 
 fn parse_int(s: String) -> Result(Int, Nil) {
   int.parse(s)
-}
-
-/// Allocate a native function object on the heap, root it, and return the ref.
-fn alloc_native_fn(
-  h: Heap,
-  function_proto: Ref,
-  native: value.NativeFn,
-  name: String,
-  length: Int,
-) -> #(Heap, Ref) {
-  let #(h, ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(native),
-        properties: dict.from_list([
-          #("name", value.builtin_property(JsString(name))),
-          #(
-            "length",
-            value.builtin_property(JsNumber(Finite(int.to_float(length)))),
-          ),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ref)
-  #(h, ref)
-}
-
-/// Add a non-enumerable method property to an object on the heap.
-fn add_method(h: Heap, obj_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
-  }
-}
-
-/// Add a non-enumerable, non-writable, non-configurable constant to an object.
-fn add_constant(h: Heap, obj_ref: Ref, name: String, val: JsValue) -> Heap {
-  case heap.read(h, obj_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let prop =
-        value.DataProperty(
-          value: val,
-          writable: False,
-          enumerable: False,
-          configurable: False,
-        )
-      let new_props = dict.insert(properties, name, prop)
-      heap.write(
-        h,
-        obj_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
-    _ -> h
-  }
 }

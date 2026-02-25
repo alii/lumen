@@ -1,8 +1,7 @@
-import arc/vm/builtins/common.{
-  type BuiltinType, BuiltinType, alloc_proto, set_constructor,
-}
+import arc/vm/builtins/common.{type BuiltinType}
 import arc/vm/builtins/helpers
 import arc/vm/heap.{type Heap}
+import arc/vm/js_elements
 import arc/vm/value.{
   type Job, type JsValue, type Ref, BoxSlot, JsBool, JsObject, JsString,
   NativeFunction, NativePromiseCatch, NativePromiseConstructor,
@@ -20,72 +19,27 @@ pub fn init(
   object_proto: Ref,
   function_proto: Ref,
 ) -> #(Heap, BuiltinType) {
-  // Promise.prototype — inherits from Object.prototype
-  let #(h, promise_proto) = alloc_proto(h, Some(object_proto), dict.new())
-
-  // Promise.prototype.then
-  let #(h, then_ref) =
-    helpers.alloc_native_fn(h, function_proto, NativePromiseThen, "then", 2)
-  let h = helpers.add_method(h, promise_proto, "then", then_ref)
-
-  // Promise.prototype.catch
-  let #(h, catch_ref) =
-    helpers.alloc_native_fn(h, function_proto, NativePromiseCatch, "catch", 1)
-  let h = helpers.add_method(h, promise_proto, "catch", catch_ref)
-
-  // Promise.prototype.finally
-  let #(h, finally_ref) =
-    helpers.alloc_native_fn(
-      h,
-      function_proto,
-      NativePromiseFinally,
-      "finally",
-      1,
-    )
-  let h = helpers.add_method(h, promise_proto, "finally", finally_ref)
-
-  // Promise constructor — a NativeFunction
-  let #(h, ctor_ref) =
-    heap.alloc(
-      h,
-      ObjectSlot(
-        kind: NativeFunction(NativePromiseConstructor),
-        properties: dict.from_list([
-          #("prototype", value.builtin_property(JsObject(promise_proto))),
-          #("name", value.builtin_property(JsString("Promise"))),
-          #("length", value.builtin_property(value.JsNumber(value.Finite(1.0)))),
-        ]),
-        elements: dict.new(),
-        prototype: Some(function_proto),
-      ),
-    )
-  let h = heap.root(h, ctor_ref)
-
-  // Promise.resolve — static method
-  let #(h, resolve_ref) =
-    helpers.alloc_native_fn(
-      h,
-      function_proto,
-      NativePromiseResolveStatic,
-      "resolve",
-      1,
-    )
-  let h = add_static(h, ctor_ref, "resolve", resolve_ref)
-
-  // Promise.reject — static method
-  let #(h, reject_ref) =
-    helpers.alloc_native_fn(
-      h,
-      function_proto,
-      NativePromiseRejectStatic,
-      "reject",
-      1,
-    )
-  let h = add_static(h, ctor_ref, "reject", reject_ref)
-
-  let h = set_constructor(h, promise_proto, ctor_ref)
-
-  #(h, BuiltinType(prototype: promise_proto, constructor: ctor_ref))
+  let #(h, proto_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("then", NativePromiseThen, 2),
+      #("catch", NativePromiseCatch, 1),
+      #("finally", NativePromiseFinally, 1),
+    ])
+  let #(h, static_methods) =
+    common.alloc_methods(h, function_proto, [
+      #("resolve", NativePromiseResolveStatic, 1),
+      #("reject", NativePromiseRejectStatic, 1),
+    ])
+  common.init_type(
+    h,
+    object_proto,
+    function_proto,
+    proto_methods,
+    fn(_) { NativePromiseConstructor },
+    "Promise",
+    1,
+    static_methods,
+  )
 }
 
 /// Allocate a new promise (PromiseSlot + ObjectSlot with PromiseObject kind).
@@ -109,8 +63,9 @@ pub fn create_promise(h: Heap, promise_proto: Ref) -> #(Heap, Ref, Ref) {
       ObjectSlot(
         kind: PromiseObject(promise_data: data_ref),
         properties: dict.new(),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(promise_proto),
+        symbol_properties: dict.new(),
       ),
     )
   #(h, obj_ref, data_ref)
@@ -141,8 +96,9 @@ pub fn create_resolving_functions(
           #("name", value.builtin_property(JsString(""))),
           #("length", value.builtin_property(value.JsNumber(value.Finite(1.0)))),
         ]),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(function_proto),
+        symbol_properties: dict.new(),
       ),
     )
 
@@ -160,8 +116,9 @@ pub fn create_resolving_functions(
           #("name", value.builtin_property(JsString(""))),
           #("length", value.builtin_property(value.JsNumber(value.Finite(1.0)))),
         ]),
-        elements: dict.new(),
+        elements: js_elements.new(),
         prototype: Some(function_proto),
+        symbol_properties: dict.new(),
       ),
     )
 
@@ -370,25 +327,6 @@ fn mark_handled(h: Heap, data_ref: Ref) -> Heap {
           is_handled: True,
         ),
       )
-    _ -> h
-  }
-}
-
-// ============================================================================
-// Internal helpers
-// ============================================================================
-
-fn add_static(h: Heap, ctor_ref: Ref, name: String, fn_ref: Ref) -> Heap {
-  case heap.read(h, ctor_ref) {
-    Ok(ObjectSlot(kind:, properties:, elements:, prototype:)) -> {
-      let new_props =
-        dict.insert(properties, name, value.builtin_property(JsObject(fn_ref)))
-      heap.write(
-        h,
-        ctor_ref,
-        ObjectSlot(kind:, properties: new_props, elements:, prototype:),
-      )
-    }
     _ -> h
   }
 }

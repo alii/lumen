@@ -4,6 +4,7 @@
 import gleam/bit_array
 import gleam/int
 import gleam/list
+import gleam/result
 import gleam/string
 
 pub type Token {
@@ -221,31 +222,28 @@ fn do_tokenize(
   acc: List(Token),
   mode: LexMode,
 ) -> Result(List(Token), LexError) {
-  case skip_whitespace_and_comments(bytes, pos, mode) {
-    Ok(#(new_pos, ws_newlines)) -> {
-      let token_line = line + ws_newlines
-      case char_at(bytes, new_pos) {
-        "" -> Ok(list.reverse([Token(Eof, "", new_pos, token_line, 0), ..acc]))
-        _ ->
-          case read_token(bytes, new_pos) {
-            Ok(token) -> {
-              let token = Token(..token, line: token_line)
-              let end_pos = token.pos + token.raw_len
-              let end_line = case token.kind {
-                // Only these token kinds can span multiple lines
-                KString | TemplateLiteral -> {
-                  let raw_value = byte_slice(bytes, token.pos, token.raw_len)
-                  token_line + count_newlines_in(raw_value)
-                }
-                _ -> token_line
-              }
-              do_tokenize(bytes, end_pos, end_line, [token, ..acc], mode)
-            }
-            Error(e) -> Error(e)
-          }
+  use #(new_pos, ws_newlines) <- result.try(skip_whitespace_and_comments(
+    bytes,
+    pos,
+    mode,
+  ))
+  let token_line = line + ws_newlines
+  case char_at(bytes, new_pos) {
+    "" -> Ok(list.reverse([Token(Eof, "", new_pos, token_line, 0), ..acc]))
+    _ -> {
+      use token <- result.try(read_token(bytes, new_pos))
+      let token = Token(..token, line: token_line)
+      let end_pos = token.pos + token.raw_len
+      let end_line = case token.kind {
+        // Only these token kinds can span multiple lines
+        KString | TemplateLiteral -> {
+          let raw_value = byte_slice(bytes, token.pos, token.raw_len)
+          token_line + count_newlines_in(raw_value)
+        }
+        _ -> token_line
       }
+      do_tokenize(bytes, end_pos, end_line, [token, ..acc], mode)
     }
-    Error(e) -> Error(e)
   }
 }
 
@@ -840,11 +838,10 @@ fn read_string_body(
       let next = char_at(bytes, pos + 1)
       case next {
         "" -> Error(UnterminatedStringLiteral(start))
-        _ ->
-          case validate_escape(bytes, pos + 1, pos, False) {
-            Ok(skip) -> read_string_body(bytes, pos + skip, start, quote)
-            Error(e) -> Error(e)
-          }
+        _ -> {
+          use skip <- result.try(validate_escape(bytes, pos + 1, pos, False))
+          read_string_body(bytes, pos + skip, start, quote)
+        }
       }
     }
     _ ->
@@ -880,12 +877,10 @@ fn read_template_body(
       let next = char_at(bytes, pos + 1)
       case next {
         "" -> Error(UnterminatedTemplateLiteral(start))
-        _ ->
-          case validate_escape(bytes, pos + 1, pos, True) {
-            Ok(skip) ->
-              read_template_body(bytes, pos + skip, start, brace_depth)
-            Error(e) -> Error(e)
-          }
+        _ -> {
+          use skip <- result.try(validate_escape(bytes, pos + 1, pos, True))
+          read_template_body(bytes, pos + skip, start, brace_depth)
+        }
       }
     }
     "$" ->
@@ -903,13 +898,9 @@ fn read_template_body(
       case brace_depth > 0 {
         // Nested template literal inside an expression — skip it
         True -> {
-          case read_template_literal(bytes, pos) {
-            Ok(inner) -> {
-              let end_pos = inner.pos + inner.raw_len
-              read_template_body(bytes, end_pos, start, brace_depth)
-            }
-            Error(e) -> Error(e)
-          }
+          use inner <- result.try(read_template_literal(bytes, pos))
+          let end_pos = inner.pos + inner.raw_len
+          read_template_body(bytes, end_pos, start, brace_depth)
         }
         False -> {
           let len = pos - start + 1
@@ -943,44 +934,35 @@ fn read_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
 }
 
 fn read_decimal_number(bytes: BitArray, start: Int) -> Result(Token, LexError) {
-  case skip_digits(bytes, start) {
-    Error(e) -> Error(e)
-    Ok(pos) -> {
-      // Check for legacy octal (0-prefixed like 01, 07) — don't consume dot
-      let is_legacy_octal =
-        char_at(bytes, start) == "0"
-        && pos - start > 1
-        && !has_non_octal(bytes, start + 1, pos)
-      case char_at(bytes, pos) {
-        "." ->
-          case is_legacy_octal {
-            True -> finish_number(bytes, start, pos)
-            False ->
-              case char_at(bytes, pos + 1) {
-                // Two dots: include trailing dot in number (123. is a valid float)
-                "." -> finish_number(bytes, start, pos + 1)
-                _ ->
-                  case skip_digits(bytes, pos + 1) {
-                    Error(e) -> Error(e)
-                    Ok(pos2) -> read_exponent(bytes, start, pos2)
-                  }
-              }
-          }
-        "e" | "E" -> read_exponent(bytes, start, pos)
-        "n" -> {
-          // BigInt
-          let end = pos + 1
-          case check_after_numeric(bytes, end) {
-            Ok(_) -> {
-              let len = end - start
-              Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
+  use pos <- result.try(skip_digits(bytes, start))
+  // Check for legacy octal (0-prefixed like 01, 07) — don't consume dot
+  let is_legacy_octal =
+    char_at(bytes, start) == "0"
+    && pos - start > 1
+    && !has_non_octal(bytes, start + 1, pos)
+  case char_at(bytes, pos) {
+    "." ->
+      case is_legacy_octal {
+        True -> finish_number(bytes, start, pos)
+        False ->
+          case char_at(bytes, pos + 1) {
+            // Two dots: include trailing dot in number (123. is a valid float)
+            "." -> finish_number(bytes, start, pos + 1)
+            _ -> {
+              use pos2 <- result.try(skip_digits(bytes, pos + 1))
+              read_exponent(bytes, start, pos2)
             }
-            Error(e) -> Error(e)
           }
-        }
-        _ -> finish_number(bytes, start, pos)
       }
+    "e" | "E" -> read_exponent(bytes, start, pos)
+    "n" -> {
+      // BigInt
+      let end = pos + 1
+      use Nil <- result.try(check_after_numeric(bytes, end))
+      let len = end - start
+      Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
     }
+    _ -> finish_number(bytes, start, pos)
   }
 }
 
@@ -1000,10 +982,8 @@ fn read_decimal_after_dot(
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_digits(bytes, pos) {
-    Error(e) -> Error(e)
-    Ok(pos2) -> read_exponent(bytes, start, pos2)
-  }
+  use pos2 <- result.try(skip_digits(bytes, pos))
+  read_exponent(bytes, start, pos2)
 }
 
 fn read_exponent(
@@ -1017,13 +997,10 @@ fn read_exponent(
         "+" | "-" -> pos + 2
         _ -> pos + 1
       }
-      case skip_digits(bytes, pos2) {
-        Error(e) -> Error(e)
-        Ok(pos3) ->
-          case pos3 == pos2 {
-            True -> Error(ExpectedExponentDigits(pos))
-            False -> finish_number(bytes, start, pos3)
-          }
+      use pos3 <- result.try(skip_digits(bytes, pos2))
+      case pos3 == pos2 {
+        True -> Error(ExpectedExponentDigits(pos))
+        False -> finish_number(bytes, start, pos3)
       }
     }
     _ -> finish_number(bytes, start, pos)
@@ -1035,25 +1012,18 @@ fn read_hex_number(
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_hex_digits(bytes, pos) {
-    Error(e) -> Error(e)
-    Ok(end) ->
-      case end == pos {
-        True -> Error(ExpectedHexDigits(start))
-        False ->
-          case char_at(bytes, end) {
-            "n" -> {
-              let bigint_end = end + 1
-              case check_after_numeric(bytes, bigint_end) {
-                Ok(_) -> {
-                  let len = bigint_end - start
-                  Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-                }
-                Error(e) -> Error(e)
-              }
-            }
-            _ -> finish_number(bytes, start, end)
-          }
+  use end <- result.try(skip_hex_digits(bytes, pos))
+  case end == pos {
+    True -> Error(ExpectedHexDigits(start))
+    False ->
+      case char_at(bytes, end) {
+        "n" -> {
+          let bigint_end = end + 1
+          use Nil <- result.try(check_after_numeric(bytes, bigint_end))
+          let len = bigint_end - start
+          Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
+        }
+        _ -> finish_number(bytes, start, end)
       }
   }
 }
@@ -1063,25 +1033,18 @@ fn read_octal_number(
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_octal_digits(bytes, pos) {
-    Error(e) -> Error(e)
-    Ok(end) ->
-      case end == pos {
-        True -> Error(ExpectedOctalDigits(start))
-        False ->
-          case char_at(bytes, end) {
-            "n" -> {
-              let bigint_end = end + 1
-              case check_after_numeric(bytes, bigint_end) {
-                Ok(_) -> {
-                  let len = bigint_end - start
-                  Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-                }
-                Error(e) -> Error(e)
-              }
-            }
-            _ -> finish_number(bytes, start, end)
-          }
+  use end <- result.try(skip_octal_digits(bytes, pos))
+  case end == pos {
+    True -> Error(ExpectedOctalDigits(start))
+    False ->
+      case char_at(bytes, end) {
+        "n" -> {
+          let bigint_end = end + 1
+          use Nil <- result.try(check_after_numeric(bytes, bigint_end))
+          let len = bigint_end - start
+          Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
+        }
+        _ -> finish_number(bytes, start, end)
       }
   }
 }
@@ -1091,25 +1054,18 @@ fn read_binary_number(
   pos: Int,
   start: Int,
 ) -> Result(Token, LexError) {
-  case skip_binary_digits(bytes, pos) {
-    Error(e) -> Error(e)
-    Ok(end) ->
-      case end == pos {
-        True -> Error(ExpectedBinaryDigits(start))
-        False ->
-          case char_at(bytes, end) {
-            "n" -> {
-              let bigint_end = end + 1
-              case check_after_numeric(bytes, bigint_end) {
-                Ok(_) -> {
-                  let len = bigint_end - start
-                  Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-                }
-                Error(e) -> Error(e)
-              }
-            }
-            _ -> finish_number(bytes, start, end)
-          }
+  use end <- result.try(skip_binary_digits(bytes, pos))
+  case end == pos {
+    True -> Error(ExpectedBinaryDigits(start))
+    False ->
+      case char_at(bytes, end) {
+        "n" -> {
+          let bigint_end = end + 1
+          use Nil <- result.try(check_after_numeric(bytes, bigint_end))
+          let len = bigint_end - start
+          Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
+        }
+        _ -> finish_number(bytes, start, end)
       }
   }
 }
@@ -1136,11 +1092,10 @@ fn finish_number(
 ) -> Result(Token, LexError) {
   let len = end - start
   case len > 0 {
-    True ->
-      case check_after_numeric(bytes, end) {
-        Ok(_) -> Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
-        Error(e) -> Error(e)
-      }
+    True -> {
+      use Nil <- result.try(check_after_numeric(bytes, end))
+      Ok(tokn(Number, byte_slice(bytes, start, len), start, len))
+    }
     False -> Error(InvalidNumber(start))
   }
 }
@@ -1376,29 +1331,21 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
   case char_at(bytes, start) {
     "\\" -> {
       // Must be a valid unicode escape that decodes to ID_Start
-      case validate_identifier_escape(bytes, start, True) {
-        Ok(first_end) -> {
-          case skip_identifier_chars_checked(bytes, first_end) {
-            Ok(end) -> Ok(make_identifier_token(bytes, start, end))
-            Error(e) -> Error(e)
-          }
-        }
-        Error(e) -> Error(e)
-      }
+      use first_end <- result.try(validate_identifier_escape(bytes, start, True))
+      use end <- result.try(skip_identifier_chars_checked(bytes, first_end))
+      Ok(make_identifier_token(bytes, start, end))
     }
     "#" -> {
       // Private field: # followed by identifier char
       case char_at(bytes, start + 1) {
         "\\" -> {
-          case validate_identifier_escape(bytes, start + 1, True) {
-            Ok(first_end) -> {
-              case skip_identifier_chars_checked(bytes, first_end) {
-                Ok(end) -> Ok(make_identifier_token(bytes, start, end))
-                Error(e) -> Error(e)
-              }
-            }
-            Error(e) -> Error(e)
-          }
+          use first_end <- result.try(validate_identifier_escape(
+            bytes,
+            start + 1,
+            True,
+          ))
+          use end <- result.try(skip_identifier_chars_checked(bytes, first_end))
+          Ok(make_identifier_token(bytes, start, end))
         }
         ch2 -> {
           // The char after # must be a valid identifier start (not # or \)
@@ -1406,10 +1353,11 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
             True -> {
               // # is 1 byte, then skip the first identifier char
               let first_end = start + 1 + char_width_at(bytes, start + 1)
-              case skip_identifier_chars_checked(bytes, first_end) {
-                Ok(end) -> Ok(make_identifier_token(bytes, start, end))
-                Error(e) -> Error(e)
-              }
+              use end <- result.try(skip_identifier_chars_checked(
+                bytes,
+                first_end,
+              ))
+              Ok(make_identifier_token(bytes, start, end))
             }
             False -> Error(UnexpectedCharacter("#", start))
           }
@@ -1418,10 +1366,8 @@ fn read_identifier(bytes: BitArray, start: Int) -> Result(Token, LexError) {
     }
     _ -> {
       let first_end = start + char_width_at(bytes, start)
-      case skip_identifier_chars_checked(bytes, first_end) {
-        Ok(end) -> Ok(make_identifier_token(bytes, start, end))
-        Error(e) -> Error(e)
-      }
+      use end <- result.try(skip_identifier_chars_checked(bytes, first_end))
+      Ok(make_identifier_token(bytes, start, end))
     }
   }
 }
