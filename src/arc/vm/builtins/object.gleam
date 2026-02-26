@@ -1028,6 +1028,7 @@ fn object_tag(heap: Heap, ref: Ref) -> String {
             value.NumberObject(_) -> "Number"
             value.BooleanObject(_) -> "Boolean"
             value.SymbolObject(_) -> "Symbol"
+            value.PidObject(_) -> "Pid"
             OrdinaryObject -> "Object"
           }
       }

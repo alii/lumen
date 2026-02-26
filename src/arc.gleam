@@ -1,12 +1,14 @@
 import arc/compiler
 import arc/parser
 import arc/vm/builtins
+import arc/vm/builtins/arc as builtins_arc
 import arc/vm/builtins/common.{type Builtins}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type Ref, ArrayObject, DataProperty, FunctionObject,
-  GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PromiseObject,
+  GeneratorObject, NativeFunction, ObjectSlot, OrdinaryObject, PidObject,
+  PromiseObject,
 }
 import arc/vm/vm
 import gleam/dict
@@ -120,6 +122,8 @@ fn inspect_object(h: Heap, ref: Ref, depth: Int, seen: set.Set(Int)) -> String {
               "[Symbol: "
               <> inspect_inner(h, value.JsSymbol(sym), depth, seen)
               <> "]"
+            PidObject(pid:) ->
+              "Pid<" <> builtins_arc.ffi_pid_to_string(pid) <> ">"
           }
         _ -> "[Object]"
       }
@@ -344,21 +348,70 @@ fn repl_loop(state: ReplState) -> Nil {
   }
 }
 
-pub fn main() -> Nil {
-  banner()
-  let h = heap.new()
-  let #(h, b) = builtins.init(h)
-  let #(h, globals) = builtins.globals(b, h)
+@external(erlang, "arc_vm_ffi", "get_script_args")
+fn get_script_args() -> List(String)
 
-  repl_loop(ReplState(
-    heap: h,
-    builtins: b,
-    env: vm.ReplEnv(
-      globals:,
-      closure_templates: dict.new(),
-      const_globals: set.new(),
-      next_symbol_id: 100,
-      symbol_descriptions: dict.new(),
-    ),
-  ))
+@external(erlang, "file", "read_file")
+fn read_file(path: String) -> Result(String, FileError)
+
+type FileError
+
+/// Run a JS source file and print the result (or error).
+fn run_file(path: String) -> Nil {
+  case read_file(path) {
+    Error(err) -> {
+      io.println("Error reading " <> path <> ": " <> string.inspect(err))
+    }
+    Ok(source) -> {
+      let h = heap.new()
+      let #(h, b) = builtins.init(h)
+      let #(h, globals) = builtins.globals(b, h)
+      case parser.parse(source, parser.Script) {
+        Error(err) ->
+          io.println("SyntaxError: " <> parser.parse_error_to_string(err))
+        Ok(program) ->
+          case compiler.compile(program) {
+            Error(compiler.Unsupported(desc)) ->
+              io.println("compile error: unsupported " <> desc)
+            Error(compiler.BreakOutsideLoop) ->
+              io.println("compile error: break outside loop")
+            Error(compiler.ContinueOutsideLoop) ->
+              io.println("compile error: continue outside loop")
+            Ok(template) ->
+              case vm.run_and_drain(template, h, b, globals) {
+                Ok(vm.NormalCompletion(_, _)) -> Nil
+                Ok(vm.ThrowCompletion(val, heap)) ->
+                  io.println("Uncaught " <> inspect(heap, val))
+                Ok(vm.YieldCompletion(_, _)) -> Nil
+                Error(vm_err) ->
+                  io.println("InternalError: " <> inspect_vm_error(vm_err))
+              }
+          }
+      }
+    }
+  }
+}
+
+pub fn main() -> Nil {
+  case get_script_args() {
+    [path, ..] -> run_file(path)
+    [] -> {
+      banner()
+      let h = heap.new()
+      let #(h, b) = builtins.init(h)
+      let #(h, globals) = builtins.globals(b, h)
+
+      repl_loop(ReplState(
+        heap: h,
+        builtins: b,
+        env: vm.ReplEnv(
+          globals:,
+          closure_templates: dict.new(),
+          const_globals: set.new(),
+          next_symbol_id: 100,
+          symbol_descriptions: dict.new(),
+        ),
+      ))
+    }
+  }
 }

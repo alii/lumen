@@ -126,12 +126,16 @@ fn init_state(
   heap: Heap,
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
+  is_module: Bool,
 ) -> State {
   let locals = array.repeat(JsUndefined, func.local_count)
+  // ES §16.2.1.5.2 ModuleEvaluation: module `this` is undefined.
   // ES §16.1.6 ScriptEvaluation: the script's this is the global object,
   // regardless of strict mode. (Strict only affects function-body this.)
-  let script_this =
-    dict.get(globals, "globalThis") |> result.unwrap(JsUndefined)
+  let this_binding = case is_module {
+    True -> JsUndefined
+    False -> dict.get(globals, "globalThis") |> result.unwrap(JsUndefined)
+  }
   State(
     stack: [],
     locals:,
@@ -146,7 +150,7 @@ fn init_state(
     finally_stack: [],
     builtins:,
     closure_templates: dict.new(),
-    this_binding: script_this,
+    this_binding:,
     callee_ref: None,
     call_args: [],
     job_queue: [],
@@ -165,7 +169,27 @@ pub fn run_with_globals(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
 ) -> Result(#(Completion, State), VmError) {
-  init_state(func, heap, builtins, globals) |> execute_inner()
+  init_state(func, heap, builtins, globals, False) |> execute_inner()
+}
+
+/// Run a module template with pre-populated global variables, then drain jobs.
+/// Module `this` is undefined per ES §16.2.1.5.2.
+pub fn run_module(
+  func: FuncTemplate,
+  heap: Heap,
+  builtins: Builtins,
+  globals: dict.Dict(String, JsValue),
+) -> Result(Completion, VmError) {
+  let result =
+    init_state(func, heap, builtins, globals, True) |> execute_inner()
+  use #(completion, final_state) <- result.try(result)
+  let drained_state = drain_jobs(final_state)
+  case completion {
+    NormalCompletion(val, _) -> Ok(NormalCompletion(val, drained_state.heap))
+    ThrowCompletion(val, _) -> Ok(ThrowCompletion(val, drained_state.heap))
+    YieldCompletion(_, _) ->
+      panic as "YieldCompletion should not appear at module level"
+  }
 }
 
 /// Run a function template with globals, then drain the promise job queue.
@@ -176,7 +200,8 @@ pub fn run_and_drain(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
 ) -> Result(Completion, VmError) {
-  let result = init_state(func, heap, builtins, globals) |> execute_inner()
+  let result =
+    init_state(func, heap, builtins, globals, False) |> execute_inner()
   use #(completion, final_state) <- result.try(result)
   let drained_state = drain_jobs(final_state)
   case completion {
@@ -4146,6 +4171,145 @@ fn dispatch_native(
     // Arc.peek — synchronously inspect promise state
     value.NativeArcPeek ->
       builtins_arc.peek(args, state, state.builtins.object.prototype)
+    // Arc.spawn — spawn a new BEAM process running a JS function
+    value.NativeArcSpawn -> arc_spawn(args, state)
+    // Arc.send — send a message to a BEAM process
+    value.NativeArcSend -> builtins_arc.send(args, state)
+    // Arc.receive — receive a message from the current process mailbox
+    value.NativeArcReceive -> builtins_arc.receive_(args, state)
+    // Arc.self — return the current process's PID
+    value.NativeArcSelf -> builtins_arc.self_(args, state)
+    // Arc.log — print values to stdout
+    value.NativeArcLog -> builtins_arc.log(args, state)
+    // Arc.sleep — suspend the current BEAM process
+    value.NativeArcSleep -> builtins_arc.sleep(args, state)
+    // Pid.toString — return formatted pid string
+    value.NativePidToString -> builtins_arc.pid_to_string(this, args, state)
+  }
+}
+
+// ============================================================================
+// Arc.spawn — spawn a new BEAM process running a JS closure
+// ============================================================================
+
+@external(erlang, "arc_vm_ffi", "spawn_process")
+fn ffi_spawn(fun: fn() -> Nil) -> value.ErlangPid
+
+/// Non-standard: Arc.spawn(fn)
+/// Spawns a new BEAM process that executes the given JS function.
+/// The spawned process gets a snapshot of the current heap, builtins,
+/// and closure templates. Returns a Pid object.
+fn arc_spawn(
+  args: List(JsValue),
+  state: State,
+) -> #(State, Result(JsValue, JsValue)) {
+  let fn_arg = case args {
+    [a, ..] -> a
+    [] -> JsUndefined
+  }
+
+  case fn_arg {
+    JsObject(fn_ref) ->
+      case heap.read(state.heap, fn_ref) {
+        Some(ObjectSlot(kind: FunctionObject(env: env_ref, ..), ..)) ->
+          case dict.get(state.closure_templates, fn_ref.id) {
+            Ok(callee_template) -> {
+              // Snapshot everything the spawned process needs
+              let heap_snapshot = state.heap
+              let builtins = state.builtins
+              let globals = state.globals
+              let closure_templates = state.closure_templates
+              let next_symbol_id = state.next_symbol_id
+              let symbol_descriptions = state.symbol_descriptions
+
+              let pid =
+                ffi_spawn(fn() {
+                  run_spawned_closure(
+                    callee_template,
+                    env_ref,
+                    heap_snapshot,
+                    builtins,
+                    globals,
+                    closure_templates,
+                    next_symbol_id,
+                    symbol_descriptions,
+                  )
+                })
+
+              let #(heap, pid_val) =
+                builtins_arc.alloc_pid_object(
+                  state.heap,
+                  state.builtins.object.prototype,
+                  state.builtins.function.prototype,
+                  pid,
+                )
+              #(State(..state, heap:), Ok(pid_val))
+            }
+            Error(Nil) ->
+              frame.type_error(state, "Arc.spawn: function template not found")
+          }
+        _ -> frame.type_error(state, "Arc.spawn: argument is not a function")
+      }
+    _ -> frame.type_error(state, "Arc.spawn: argument is not a function")
+  }
+}
+
+/// Run a JS closure in a standalone BEAM process. Sets up a fresh VM
+/// state from the snapshot and executes the function to completion.
+fn run_spawned_closure(
+  callee_template: FuncTemplate,
+  env_ref: value.Ref,
+  heap: Heap,
+  builtins: Builtins,
+  globals: dict.Dict(String, JsValue),
+  closure_templates: dict.Dict(Int, FuncTemplate),
+  next_symbol_id: Int,
+  symbol_descriptions: dict.Dict(Int, String),
+) -> Nil {
+  let env_values = case heap.read(heap, env_ref) {
+    Some(value.EnvSlot(slots)) -> slots
+    _ -> []
+  }
+  let env_count = list.length(env_values)
+  let remaining =
+    callee_template.local_count - env_count - callee_template.arity
+  let padded_args = list.repeat(JsUndefined, callee_template.arity)
+  let locals =
+    list.flatten([env_values, padded_args, list.repeat(JsUndefined, remaining)])
+    |> array.from_list
+
+  let state =
+    State(
+      stack: [],
+      locals:,
+      constants: callee_template.constants,
+      globals:,
+      func: callee_template,
+      code: callee_template.bytecode,
+      heap:,
+      pc: 0,
+      call_stack: [],
+      try_stack: [],
+      finally_stack: [],
+      builtins:,
+      closure_templates:,
+      this_binding: JsUndefined,
+      callee_ref: None,
+      call_args: [],
+      job_queue: [],
+      const_globals: set.new(),
+      next_symbol_id:,
+      symbol_descriptions:,
+      js_to_string: js_to_string_callback,
+      call_fn: call_fn_callback,
+    )
+
+  case execute_inner(state) {
+    Ok(#(_, final_state)) -> {
+      let _ = drain_jobs(final_state)
+      Nil
+    }
+    Error(_) -> Nil
   }
 }
 

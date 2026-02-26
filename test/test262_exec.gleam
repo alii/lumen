@@ -83,9 +83,9 @@ fn generate_test_suite() -> test_runner.EunitTests {
         let metadata = test262_metadata.parse_metadata(source)
 
         let should_skip =
-          list.contains(metadata.flags, "module")
-          || list.contains(metadata.flags, "async")
+          list.contains(metadata.flags, "async")
           || metadata.negative_phase == Some(Resolution)
+          || list.contains(metadata.features, "top-level-await")
 
         case should_skip {
           True -> {
@@ -272,16 +272,24 @@ fn run_test_by_phase(metadata: TestMetadata, source: String) -> TestOutcome {
     False -> source
   }
 
+  let is_module = list.contains(metadata.flags, "module")
   case metadata.negative_phase {
-    Some(Parse) -> run_parse_negative_test(source)
+    Some(Parse) -> run_parse_negative_test(metadata, source)
     Some(Resolution) -> Skip("resolution")
-    Some(Runtime) -> run_runtime_negative_test(metadata, source)
-    None -> run_positive_test(metadata, source)
+    Some(Runtime) -> run_runtime_negative_test(metadata, source, is_module)
+    None -> run_positive_test(metadata, source, is_module)
   }
 }
 
-fn run_parse_negative_test(source: String) -> TestOutcome {
-  case parser.parse(source, parser.Script) {
+fn run_parse_negative_test(
+  metadata: TestMetadata,
+  source: String,
+) -> TestOutcome {
+  let mode = case list.contains(metadata.flags, "module") {
+    True -> parser.Module
+    False -> parser.Script
+  }
+  case parser.parse(source, mode) {
     Error(_) -> Pass
     Ok(_) -> Fail("expected parse error but parsed successfully")
   }
@@ -290,9 +298,10 @@ fn run_parse_negative_test(source: String) -> TestOutcome {
 fn run_runtime_negative_test(
   metadata: TestMetadata,
   source: String,
+  is_module: Bool,
 ) -> TestOutcome {
   let full_source = prepend_harness(metadata, source)
-  case parse_compile_run(full_source) {
+  case parse_compile_run(full_source, is_module) {
     Ok(vm.ThrowCompletion(_, _)) -> Pass
     Ok(vm.NormalCompletion(_, _)) ->
       Fail("expected runtime throw but completed normally")
@@ -301,9 +310,13 @@ fn run_runtime_negative_test(
   }
 }
 
-fn run_positive_test(metadata: TestMetadata, source: String) -> TestOutcome {
+fn run_positive_test(
+  metadata: TestMetadata,
+  source: String,
+  is_module: Bool,
+) -> TestOutcome {
   let full_source = prepend_harness(metadata, source)
-  case parse_compile_run(full_source) {
+  case parse_compile_run(full_source, is_module) {
     Ok(vm.NormalCompletion(_, _)) -> Pass
     Ok(vm.ThrowCompletion(thrown, heap)) ->
       Fail("unexpected throw: " <> inspect_thrown(thrown, heap))
@@ -314,10 +327,13 @@ fn run_positive_test(metadata: TestMetadata, source: String) -> TestOutcome {
 
 const test_timeout_ms = 5000
 
-fn parse_compile_run(source: String) -> Result(vm.Completion, String) {
+fn parse_compile_run(
+  source: String,
+  is_module: Bool,
+) -> Result(vm.Completion, String) {
   case
     test_runner.run_with_timeout(
-      fn() { do_parse_compile_run(source) },
+      fn() { do_parse_compile_run(source, is_module) },
       test_timeout_ms,
     )
   {
@@ -326,8 +342,15 @@ fn parse_compile_run(source: String) -> Result(vm.Completion, String) {
   }
 }
 
-fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
-  case parser.parse(source, parser.Script) {
+fn do_parse_compile_run(
+  source: String,
+  is_module: Bool,
+) -> Result(vm.Completion, String) {
+  let mode = case is_module {
+    True -> parser.Module
+    False -> parser.Script
+  }
+  case parser.parse(source, mode) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
     Ok(program) ->
       case compiler.compile(program) {
@@ -340,9 +363,22 @@ fn do_parse_compile_run(source: String) -> Result(vm.Completion, String) {
           let h = heap.new()
           let #(h, b) = builtins.init(h)
           let #(h, globals) = builtins.globals(b, h)
-          case vm.run_and_drain(template, h, b, globals) {
-            Ok(completion) -> Ok(completion)
-            Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
+          case is_module {
+            True -> {
+              // For modules, resolve import bindings and inject into globals
+              let imports = compiler.extract_module_imports(program)
+              let globals =
+                builtins.resolve_module_imports(imports, h, b, globals)
+              case vm.run_module(template, h, b, globals) {
+                Ok(completion) -> Ok(completion)
+                Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
+              }
+            }
+            False ->
+              case vm.run_and_drain(template, h, b, globals) {
+                Ok(completion) -> Ok(completion)
+                Error(vm_err) -> Error("vm: " <> string.inspect(vm_err))
+              }
           }
         }
       }

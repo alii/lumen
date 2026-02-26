@@ -6297,3 +6297,100 @@ pub fn strict_reference_error_type_test() -> Nil {
     JsBool(True),
   )
 }
+
+// ============================================================================
+// Module compilation
+// ============================================================================
+
+/// Parse + compile + run JS module source, return the completion value.
+fn run_module(source: String) -> Result(vm.Completion, String) {
+  case parser.parse(source, parser.Module) {
+    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
+    Ok(program) -> {
+      let imports = compiler.extract_module_imports(program)
+      case compiler.compile(program) {
+        Error(compiler.Unsupported(desc)) ->
+          Error("compile error: unsupported " <> desc)
+        Error(compiler.BreakOutsideLoop) ->
+          Error("compile error: break outside loop")
+        Error(compiler.ContinueOutsideLoop) ->
+          Error("compile error: continue outside loop")
+        Ok(template) -> {
+          let h = heap.new()
+          let #(h, b) = builtins.init(h)
+          let #(h, globals) = builtins.globals(b, h)
+          let globals = builtins.resolve_module_imports(imports, h, b, globals)
+          case vm.run_module(template, h, b, globals) {
+            Ok(completion) -> Ok(completion)
+            Error(vm_err) -> Error("vm error: " <> inspect_vm_error(vm_err))
+          }
+        }
+      }
+    }
+  }
+}
+
+fn assert_module_normal(source: String, expected: value.JsValue) -> Nil {
+  case run_module(source) {
+    Ok(vm.NormalCompletion(value, _)) -> {
+      let assert True = value == expected
+      Nil
+    }
+    Ok(vm.ThrowCompletion(thrown, heap)) ->
+      panic as {
+        "Expected normal completion but got throw: "
+        <> string.inspect(thrown)
+        <> " heap="
+        <> string.inspect(heap)
+      }
+    Ok(vm.YieldCompletion(_, _)) -> panic as "unexpected YieldCompletion"
+    Error(err) -> panic as { "run_module failed: " <> err }
+  }
+}
+
+pub fn module_basic_strict_mode_test() -> Nil {
+  // Modules are always strict — `this` at the top level is undefined
+  assert_module_normal("typeof this", JsString("undefined"))
+}
+
+pub fn module_variable_declaration_test() -> Nil {
+  assert_module_normal("let x = 42; x", JsNumber(Finite(42.0)))
+}
+
+pub fn module_function_declaration_test() -> Nil {
+  assert_module_normal(
+    "function add(a, b) { return a + b; } add(1, 2)",
+    JsNumber(Finite(3.0)),
+  )
+}
+
+pub fn module_export_named_declaration_test() -> Nil {
+  // export let x = 42 should still work (the declaration runs)
+  assert_module_normal("export let x = 42; x", JsNumber(Finite(42.0)))
+}
+
+pub fn module_export_function_test() -> Nil {
+  assert_module_normal(
+    "export function greet() { return 'hello'; } greet()",
+    JsString("hello"),
+  )
+}
+
+pub fn module_import_arc_peek_test() -> Nil {
+  // import { peek } from 'arc' should resolve peek to Arc.peek
+  assert_module_normal(
+    "import { peek } from 'arc';
+     var p = Promise.resolve(42);
+     peek(p).type",
+    JsString("resolved"),
+  )
+}
+
+pub fn module_import_arc_namespace_test() -> Nil {
+  // import * as arc from 'arc' should give the Arc object
+  assert_module_normal(
+    "import * as arc from 'arc';
+     typeof arc.peek",
+    JsString("function"),
+  )
+}

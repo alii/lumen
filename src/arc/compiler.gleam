@@ -27,7 +27,10 @@ pub type CompileError {
 pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.emit_program)
-    ast.Module(_) -> Error(Unsupported("modules not supported"))
+    ast.Module(body) -> {
+      let stmts = module_items_to_stmts(body)
+      compile_script(stmts, emit.emit_module)
+    }
   }
 }
 
@@ -35,8 +38,57 @@ pub fn compile(program: ast.Program) -> Result(FuncTemplate, CompileError) {
 pub fn compile_repl(program: ast.Program) -> Result(FuncTemplate, CompileError) {
   case program {
     ast.Script(body) -> compile_script(body, emit.emit_program_repl)
-    ast.Module(_) -> Error(Unsupported("modules not supported"))
+    ast.Module(_) -> Error(Unsupported("modules not supported in REPL"))
   }
+}
+
+/// Extract import bindings from a module AST.
+/// Returns a list of (specifier, [(imported_name, local_name)]) pairs.
+/// Used by the host to resolve imports before execution.
+pub fn extract_module_imports(
+  program: ast.Program,
+) -> List(#(String, List(#(String, String)))) {
+  case program {
+    ast.Script(_) -> []
+    ast.Module(body) ->
+      list.filter_map(body, fn(item) {
+        case item {
+          ast.ImportDeclaration(specifiers, ast.StringLit(source)) -> {
+            let bindings =
+              list.map(specifiers, fn(spec) {
+                case spec {
+                  ast.ImportNamedSpecifier(imported:, local:) -> #(
+                    imported,
+                    local,
+                  )
+                  ast.ImportDefaultSpecifier(local:) -> #("default", local)
+                  ast.ImportNamespaceSpecifier(local:) -> #("*", local)
+                }
+              })
+            Ok(#(source, bindings))
+          }
+          _ -> Error(Nil)
+        }
+      })
+  }
+}
+
+/// Convert module items to statements, stripping import/export wrappers.
+/// - StatementItem → unwrap to the underlying statement
+/// - ExportNamedDeclaration with a declaration → unwrap to the declaration
+/// - ExportDefaultDeclaration → emit as expression statement
+/// - ImportDeclaration, re-exports → filtered out (resolved by VM)
+fn module_items_to_stmts(items: List(ast.ModuleItem)) -> List(ast.Statement) {
+  list.filter_map(items, fn(item) {
+    case item {
+      ast.StatementItem(stmt) -> Ok(stmt)
+      ast.ExportNamedDeclaration(option.Some(decl), _, _) -> Ok(decl)
+      ast.ExportDefaultDeclaration(decl) -> Ok(ast.ExpressionStatement(decl))
+      ast.ImportDeclaration(..) -> Error(Nil)
+      ast.ExportNamedDeclaration(None, _, _) -> Error(Nil)
+      ast.ExportAllDeclaration(..) -> Error(Nil)
+    }
+  })
 }
 
 fn compile_script(

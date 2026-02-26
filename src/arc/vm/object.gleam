@@ -1358,6 +1358,7 @@ fn inspect_object(
           "[Symbol: "
           <> inspect_inner(value.JsSymbol(sym), heap, depth, visited)
           <> "]"
+        value.PidObject(_) -> "Pid {}"
         OrdinaryObject -> inspect_plain_object(heap, properties, depth, visited)
       }
     _ -> "[Object]"

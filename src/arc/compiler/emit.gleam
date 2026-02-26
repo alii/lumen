@@ -124,7 +124,7 @@ pub fn emit_program(
   ),
   EmitError,
 ) {
-  emit_program_common(stmts, True, emit_stmt, emit_stmt_tail)
+  emit_program_common(stmts, True, False, emit_stmt, emit_stmt_tail)
 }
 
 /// Emit IR for REPL mode: top-level var/let/const skip DeclareVar so they
@@ -142,15 +142,34 @@ pub fn emit_program_repl(
   ),
   EmitError,
 ) {
-  emit_program_common(stmts, False, emit_stmt_repl, emit_stmt_tail_repl)
+  emit_program_common(stmts, False, False, emit_stmt_repl, emit_stmt_tail_repl)
+}
+
+/// Emit IR for a module body. Always strict mode.
+/// Module items are pre-converted to statements by the compiler.
+pub fn emit_module(
+  stmts: List(ast.Statement),
+) -> Result(
+  #(
+    List(EmitterOp),
+    List(JsValue),
+    Dict(JsValue, Int),
+    List(CompiledChild),
+    Bool,
+  ),
+  EmitError,
+) {
+  emit_program_common(stmts, True, True, emit_stmt, emit_stmt_tail)
 }
 
 /// Common program emission: sets up scope, hoists, emits body, tears down.
 /// When hoist_vars is True, collects and emits DeclareVar for var declarations.
 /// When False (REPL mode), skips DeclareVar so vars resolve to globals.
+/// When force_strict is True, the program is always strict (modules).
 fn emit_program_common(
   stmts: List(ast.Statement),
   hoist_vars: Bool,
+  force_strict: Bool,
   emit_non_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
   emit_tail: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
 ) -> Result(
@@ -164,7 +183,8 @@ fn emit_program_common(
   EmitError,
 ) {
   // Detect top-level strict directive so child functions inherit.
-  let script_strict = has_use_strict_directive(stmts)
+  // Modules are always strict regardless of directives.
+  let script_strict = force_strict || has_use_strict_directive(stmts)
   let e = Emitter(..new_emitter(), strict: script_strict)
 
   // Wrap in function scope
@@ -629,8 +649,10 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
             list.flat_map(consequent, collect_vars_stmt)
         }
       })
-    // Don't enter nested functions
-    ast.FunctionDeclaration(..) -> []
+    // Function declarations: include the name for hoisting (DeclareVar)
+    // but don't recurse into the body (nested scope).
+    ast.FunctionDeclaration(Some(name), ..) -> [name]
+    ast.FunctionDeclaration(None, ..) -> []
     _ -> []
   }
 }

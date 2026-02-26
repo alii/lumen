@@ -50,6 +50,24 @@ pub type BigInt {
   BigInt(value: Int)
 }
 
+/// An opaque Erlang process identifier. Only created/consumed via FFI.
+pub type ErlangPid
+
+/// A serializable message that can be sent between BEAM processes.
+/// Materializes heap-allocated structures (objects, arrays) into
+/// self-contained values that don't reference any specific VM heap.
+pub type PortableMessage {
+  PmUndefined
+  PmNull
+  PmBool(Bool)
+  PmNumber(JsNum)
+  PmString(String)
+  PmBigInt(BigInt)
+  PmArray(List(PortableMessage))
+  PmObject(List(#(String, PortableMessage)))
+  PmPid(ErlangPid)
+}
+
 /// JS number representation. BEAM floats can't represent NaN or Infinity,
 /// so we use an explicit tagged type.
 pub type JsNum {
@@ -260,6 +278,20 @@ pub type NativeFn {
   NativeIteratorSymbolIterator
   /// Arc.peek(promise) — synchronously inspect promise state.
   NativeArcPeek
+  /// Arc.spawn(fn) — spawn a new BEAM process running the given JS function.
+  NativeArcSpawn
+  /// Arc.send(pid, message) — send a message to a BEAM process.
+  NativeArcSend
+  /// Arc.receive(timeout?) — receive a message from the current process mailbox.
+  NativeArcReceive
+  /// Arc.self() — return the current BEAM process's PID.
+  NativeArcSelf
+  /// Arc.log(...args) — print values to stdout (like console.log).
+  NativeArcLog
+  /// Arc.sleep(ms) — suspend the current BEAM process for ms milliseconds.
+  NativeArcSleep
+  /// Pid.prototype.toString — returns "Pid<<0.83.0>>" style string.
+  NativePidToString
 }
 
 /// Distinguishes the kind of object stored in a unified ObjectSlot.
@@ -302,6 +334,9 @@ pub type ExoticKind {
   /// Boxed Symbol (`Object(sym)` only; `new Symbol()` is a TypeError).
   /// Has [[SymbolData]]. Ordinary object aside from the internal slot.
   SymbolObject(value: SymbolId)
+  /// Erlang PID wrapper for Arc.spawn/self. Contains an opaque BEAM process
+  /// identifier that can be used with Arc.send.
+  PidObject(pid: ErlangPid)
 }
 
 /// Property descriptor — writable/enumerable/configurable flags per property.
@@ -607,7 +642,8 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         | StringObject(_)
         | NumberObject(_)
         | BooleanObject(_)
-        | SymbolObject(_) -> []
+        | SymbolObject(_)
+        | PidObject(_) -> []
       }
       list.flatten([prop_refs, sym_prop_refs, elem_refs, proto_refs, kind_refs])
     }

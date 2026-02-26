@@ -1,6 +1,8 @@
 -module(arc_vm_ffi).
 -export([float_power/2, math_sqrt/1, math_log/1, math_sin/1, math_cos/1, math_floor/1, math_ceil/1, read_line/1]).
 -export([array_from_list/1, array_to_list/1, array_get/2, array_set/3, array_size/1, array_repeat/2, array_grow/3]).
+-export([spawn_process/1, self_pid/0, send_message/2, receive_message_infinite/0, receive_message_timeout/1, pid_to_string/1]).
+-export([get_script_args/0, sleep/1]).
 
 float_power(Base, Exp) ->
     math:pow(Base, Exp).
@@ -46,3 +48,17 @@ array_grow(Tuple, NewSize, Default) ->
             Pad = lists:duplicate(NewSize - Old, Default),
             list_to_tuple(tuple_to_list(Tuple) ++ Pad)
     end.
+
+%% Process primitives for Arc.spawn/send/receive/self
+spawn_process(Fun) -> spawn(Fun).
+self_pid() -> self().
+send_message(Pid, Msg) -> Pid ! Msg, ok.
+receive_message_infinite() ->
+    receive Msg -> Msg end.
+receive_message_timeout(Timeout) ->
+    receive Msg -> {ok, Msg}
+    after Timeout -> {error, nil}
+    end.
+pid_to_string(Pid) -> list_to_binary(pid_to_list(Pid)).
+get_script_args() -> [list_to_binary(A) || A <- init:get_plain_arguments()].
+sleep(Ms) -> timer:sleep(Ms), nil.
