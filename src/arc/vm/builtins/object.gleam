@@ -444,9 +444,7 @@ fn apply_descriptor(
             common.make_type_error(
               state.heap,
               state.builtins,
-              "Cannot define property "
-                <> key
-                <> ", object is not extensible",
+              "Cannot define property " <> key <> ", object is not extensible",
             )
           Error(#(err, State(..state, heap: h)))
         }
