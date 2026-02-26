@@ -447,18 +447,17 @@ fn serialize_heap_object(
           symbol_properties:,
           ..,
         )) -> {
-          use props <- result.try(serialize_object_props(
-            heap,
-            dict.to_list(properties),
-            seen,
-            [],
-          ))
-          use sym_props <- result.try(serialize_symbol_props(
-            heap,
-            dict.to_list(symbol_properties),
-            seen,
-            [],
-          ))
+          use props <- result.try(
+            serialize_object_props(heap, dict.to_list(properties), seen, []),
+          )
+          use sym_props <- result.try(
+            serialize_symbol_props(
+              heap,
+              dict.to_list(symbol_properties),
+              seen,
+              [],
+            ),
+          )
           Ok(PmObject(properties: props, symbol_properties: sym_props))
         }
         Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Ok(PmPid(pid))
@@ -522,14 +521,10 @@ fn serialize_symbol_props(
 ) -> Result(List(#(value.SymbolId, PortableMessage)), String) {
   case entries {
     [] -> Ok(list.reverse(acc))
-    [#(key, DataProperty(value: val, enumerable: True, ..)), ..rest] -> {
+    [#(key, DataProperty(value: val, ..)), ..rest] -> {
       use pm <- result.try(serialize_inner(heap, val, seen))
       serialize_symbol_props(heap, rest, seen, [#(key, pm), ..acc])
     }
-    [#(_key, DataProperty(enumerable: False, ..)), ..] ->
-      Error(
-        "cannot send object with non-enumerable symbol property between processes",
-      )
     [#(_key, value.AccessorProperty(..)), ..] ->
       Error(
         "cannot send object with accessor symbol property between processes",
