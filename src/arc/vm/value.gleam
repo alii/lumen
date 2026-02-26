@@ -11,36 +11,43 @@ pub type Ref {
 }
 
 /// Unique symbol identity. Not heap-allocated — symbols are value types on BEAM.
+/// An opaque Erlang reference. Globally unique across the entire BEAM cluster.
+/// Created via make_ref() FFI — no two calls ever return the same value.
+pub type ErlangRef
+
+/// Symbol identity. Well-known symbols use fixed integer IDs (compile-time
+/// constants). User-created symbols use Erlang references for global uniqueness
+/// across processes — no shared counter needed.
 pub type SymbolId {
-  SymbolId(id: Int)
+  WellKnownSymbol(id: Int)
+  UserSymbol(ref: ErlangRef)
 }
 
-// Well-known symbol constants. IDs 1-20 reserved for well-knowns;
-// user-created symbols start at 100.
-pub const symbol_to_string_tag = SymbolId(1)
+// Well-known symbol constants.
+pub const symbol_to_string_tag = WellKnownSymbol(1)
 
-pub const symbol_iterator = SymbolId(2)
+pub const symbol_iterator = WellKnownSymbol(2)
 
-pub const symbol_has_instance = SymbolId(3)
+pub const symbol_has_instance = WellKnownSymbol(3)
 
-pub const symbol_is_concat_spreadable = SymbolId(4)
+pub const symbol_is_concat_spreadable = WellKnownSymbol(4)
 
-pub const symbol_to_primitive = SymbolId(5)
+pub const symbol_to_primitive = WellKnownSymbol(5)
 
-pub const symbol_species = SymbolId(6)
+pub const symbol_species = WellKnownSymbol(6)
 
-pub const symbol_async_iterator = SymbolId(7)
+pub const symbol_async_iterator = WellKnownSymbol(7)
 
 /// Get the description string for a well-known symbol.
 pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
-  case id.id {
-    1 -> Some("Symbol.toStringTag")
-    2 -> Some("Symbol.iterator")
-    3 -> Some("Symbol.hasInstance")
-    4 -> Some("Symbol.isConcatSpreadable")
-    5 -> Some("Symbol.toPrimitive")
-    6 -> Some("Symbol.species")
-    7 -> Some("Symbol.asyncIterator")
+  case id {
+    WellKnownSymbol(1) -> Some("Symbol.toStringTag")
+    WellKnownSymbol(2) -> Some("Symbol.iterator")
+    WellKnownSymbol(3) -> Some("Symbol.hasInstance")
+    WellKnownSymbol(4) -> Some("Symbol.isConcatSpreadable")
+    WellKnownSymbol(5) -> Some("Symbol.toPrimitive")
+    WellKnownSymbol(6) -> Some("Symbol.species")
+    WellKnownSymbol(7) -> Some("Symbol.asyncIterator")
     _ -> None
   }
 }
@@ -64,8 +71,12 @@ pub type PortableMessage {
   PmString(String)
   PmBigInt(BigInt)
   PmArray(List(PortableMessage))
-  PmObject(List(#(String, PortableMessage)))
+  PmObject(
+    properties: List(#(String, PortableMessage)),
+    symbol_properties: List(#(SymbolId, PortableMessage)),
+  )
   PmPid(ErlangPid)
+  PmSymbol(SymbolId)
 }
 
 /// JS number representation. BEAM floats can't represent NaN or Infinity,

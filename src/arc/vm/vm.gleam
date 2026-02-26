@@ -155,7 +155,6 @@ fn init_state(
     call_args: [],
     job_queue: [],
     const_globals: set.new(),
-    next_symbol_id: 100,
     symbol_descriptions: dict.new(),
     js_to_string: js_to_string_callback,
     call_fn: call_fn_callback,
@@ -218,8 +217,7 @@ pub type ReplEnv {
     globals: dict.Dict(String, JsValue),
     closure_templates: dict.Dict(Int, FuncTemplate),
     const_globals: set.Set(String),
-    next_symbol_id: Int,
-    symbol_descriptions: dict.Dict(Int, String),
+    symbol_descriptions: dict.Dict(value.SymbolId, String),
   )
 }
 
@@ -252,7 +250,6 @@ pub fn run_and_drain_repl(
       call_args: [],
       job_queue: [],
       const_globals: env.const_globals,
-      next_symbol_id: env.next_symbol_id,
       symbol_descriptions: env.symbol_descriptions,
       js_to_string: js_to_string_callback,
       call_fn: call_fn_callback,
@@ -264,7 +261,6 @@ pub fn run_and_drain_repl(
       globals: drained_state.globals,
       closure_templates: drained_state.closure_templates,
       const_globals: drained_state.const_globals,
-      next_symbol_id: drained_state.next_symbol_id,
       symbol_descriptions: drained_state.symbol_descriptions,
     )
   case completion {
@@ -3404,18 +3400,13 @@ fn call_native(
       call_native_generator_throw(state, this, args, rest_stack)
     // Symbol() constructor — callable but NOT new-able
     value.NativeSymbolConstructor -> {
-      let #(next_id, new_descs, sym_val) =
-        builtins_symbol.call_symbol(
-          args,
-          state.next_symbol_id,
-          state.symbol_descriptions,
-        )
+      let #(new_descs, sym_val) =
+        builtins_symbol.call_symbol(args, state.symbol_descriptions)
       Ok(
         State(
           ..state,
           stack: [sym_val, ..rest_stack],
           pc: state.pc + 1,
-          next_symbol_id: next_id,
           symbol_descriptions: new_descs,
         ),
       )
@@ -4192,7 +4183,7 @@ fn dispatch_native(
 // Arc.spawn — spawn a new BEAM process running a JS closure
 // ============================================================================
 
-@external(erlang, "arc_vm_ffi", "spawn_process")
+@external(erlang, "erlang", "spawn")
 fn ffi_spawn(fun: fn() -> Nil) -> value.ErlangPid
 
 /// Non-standard: Arc.spawn(fn)
@@ -4219,7 +4210,6 @@ fn arc_spawn(
               let builtins = state.builtins
               let globals = state.globals
               let closure_templates = state.closure_templates
-              let next_symbol_id = state.next_symbol_id
               let symbol_descriptions = state.symbol_descriptions
 
               let pid =
@@ -4231,7 +4221,6 @@ fn arc_spawn(
                     builtins,
                     globals,
                     closure_templates,
-                    next_symbol_id,
                     symbol_descriptions,
                   )
                 })
@@ -4263,8 +4252,7 @@ fn run_spawned_closure(
   builtins: Builtins,
   globals: dict.Dict(String, JsValue),
   closure_templates: dict.Dict(Int, FuncTemplate),
-  next_symbol_id: Int,
-  symbol_descriptions: dict.Dict(Int, String),
+  symbol_descriptions: dict.Dict(value.SymbolId, String),
 ) -> Nil {
   let env_values = case heap.read(heap, env_ref) {
     Some(value.EnvSlot(slots)) -> slots
@@ -4298,7 +4286,6 @@ fn run_spawned_closure(
       call_args: [],
       job_queue: [],
       const_globals: set.new(),
-      next_symbol_id:,
       symbol_descriptions:,
       js_to_string: js_to_string_callback,
       call_fn: call_fn_callback,
@@ -6867,5 +6854,5 @@ fn num_to_int32(n: JsNum) -> Int {
 // Float helpers — only power needs FFI now
 // ============================================================================
 
-@external(erlang, "arc_vm_ffi", "float_power")
+@external(erlang, "math", "pow")
 fn float_power(base: Float, exp: Float) -> Float

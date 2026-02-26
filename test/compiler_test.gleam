@@ -5761,7 +5761,6 @@ fn run_repl_lines(
       globals:,
       closure_templates: dict.new(),
       const_globals: set.new(),
-      next_symbol_id: 100,
       symbol_descriptions: dict.new(),
     )
   run_repl_lines_loop(lines, h, b, env)
@@ -5831,7 +5830,6 @@ fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
       globals:,
       closure_templates: dict.new(),
       const_globals: set.new(),
-      next_symbol_id: 100,
       symbol_descriptions: dict.new(),
     )
   run_repl_throw_loop(lines, h, b, env)

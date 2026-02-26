@@ -5,11 +5,11 @@ import gleam/option.{type Option}
 pub type Array(a)
 
 /// Convert a list to an array. O(n).
-@external(erlang, "arc_vm_ffi", "array_from_list")
+@external(erlang, "erlang", "list_to_tuple")
 pub fn from_list(items: List(a)) -> Array(a)
 
 /// Convert an array back to a list. O(n).
-@external(erlang, "arc_vm_ffi", "array_to_list")
+@external(erlang, "erlang", "tuple_to_list")
 pub fn to_list(arr: Array(a)) -> List(a)
 
 /// Read element at index (0-based). O(1).
@@ -21,7 +21,7 @@ pub fn get(index: Int, arr: Array(a)) -> Option(a)
 pub fn set(index: Int, value: a, arr: Array(a)) -> Result(Array(a), Nil)
 
 /// Number of elements. O(1).
-@external(erlang, "arc_vm_ffi", "array_size")
+@external(erlang, "erlang", "tuple_size")
 pub fn size(arr: Array(a)) -> Int
 
 /// Create an array of `count` elements all set to `value`. O(n) single BIF.

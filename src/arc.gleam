@@ -316,7 +316,6 @@ fn repl_loop(state: ReplState) -> Nil {
               globals:,
               closure_templates: dict.new(),
               const_globals: set.new(),
-              next_symbol_id: 100,
               symbol_descriptions: dict.new(),
             )
           let state = ReplState(heap: h, builtins: b, env:)
@@ -408,7 +407,6 @@ pub fn main() -> Nil {
           globals:,
           closure_templates: dict.new(),
           const_globals: set.new(),
-          next_symbol_id: 100,
           symbol_descriptions: dict.new(),
         ),
       ))

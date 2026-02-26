@@ -671,7 +671,7 @@ pub fn type_error_thrown_for_symbol_conversion_test() {
   let func =
     make_func(
       [PushConst(0), UnaryOp(Pos)],
-      [value.JsSymbol(value.SymbolId(1))],
+      [value.JsSymbol(value.WellKnownSymbol(1))],
       0,
     )
   let h = heap.new()

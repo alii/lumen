@@ -48,22 +48,22 @@ pub fn init(h: Heap, object_proto: Ref, function_proto: Ref) -> #(Heap, Ref) {
   #(h, ctor_ref)
 }
 
-/// Symbol() call implementation. Creates a new unique symbol.
-/// Returns #(heap, next_symbol_id, result).
+@external(erlang, "erlang", "make_ref")
+fn make_ref() -> value.ErlangRef
+
+/// Symbol() call implementation. Creates a new unique symbol backed by
+/// an Erlang reference — globally unique across the BEAM cluster.
 pub fn call_symbol(
   args: List(JsValue),
-  next_symbol_id: Int,
-  symbol_descriptions: dict.Dict(Int, String),
-) -> #(Int, dict.Dict(Int, String), JsValue) {
-  let id = value.SymbolId(next_symbol_id)
-  let new_next = next_symbol_id + 1
+  symbol_descriptions: dict.Dict(value.SymbolId, String),
+) -> #(dict.Dict(value.SymbolId, String), JsValue) {
+  let id = value.UserSymbol(make_ref())
 
   // Optional description argument
   let new_descriptions = case args {
-    [JsString(desc), ..] ->
-      dict.insert(symbol_descriptions, next_symbol_id, desc)
+    [JsString(desc), ..] -> dict.insert(symbol_descriptions, id, desc)
     _ -> symbol_descriptions
   }
 
-  #(new_next, new_descriptions, JsSymbol(id))
+  #(new_descriptions, JsSymbol(id))
 }

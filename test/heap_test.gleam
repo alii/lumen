@@ -3,7 +3,7 @@ import arc/vm/js_elements
 import arc/vm/value.{
   ArrayObject, BigInt, BoxSlot, EnvSlot, Finite, FunctionObject, JsBigInt,
   JsNull, JsNumber, JsObject, JsString, JsSymbol, ObjectSlot, OrdinaryObject,
-  Ref, SymbolId,
+  Ref, WellKnownSymbol,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -416,7 +416,7 @@ pub fn non_ref_values_dont_prevent_gc_test() {
       h,
       ordinary(
         dict.from_list([
-          #("sym", JsSymbol(SymbolId(1))),
+          #("sym", JsSymbol(WellKnownSymbol(1))),
           #("big", JsBigInt(BigInt(999_999_999_999))),
           #("str", JsString("hello")),
         ]),

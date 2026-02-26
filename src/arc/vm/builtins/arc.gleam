@@ -8,8 +8,8 @@ import arc/vm/value.{
   NativeArcLog, NativeArcPeek, NativeArcReceive, NativeArcSelf, NativeArcSend,
   NativeArcSleep, NativeArcSpawn, NativePidToString, ObjectSlot, OrdinaryObject,
   PidObject, PmArray, PmBigInt, PmBool, PmNull, PmNumber, PmObject, PmPid,
-  PmString, PmUndefined, PromiseFulfilled, PromiseObject, PromisePending,
-  PromiseRejected, PromiseSlot,
+  PmString, PmSymbol, PmUndefined, PromiseFulfilled, PromiseObject,
+  PromisePending, PromiseRejected, PromiseSlot,
 }
 import gleam/dict
 import gleam/io
@@ -21,7 +21,7 @@ import gleam/string
 
 // -- FFI declarations --------------------------------------------------------
 
-@external(erlang, "arc_vm_ffi", "self_pid")
+@external(erlang, "erlang", "self")
 fn ffi_self() -> value.ErlangPid
 
 @external(erlang, "arc_vm_ffi", "send_message")
@@ -424,7 +424,7 @@ fn serialize_inner(
     JsString(s) -> Ok(PmString(s))
     JsBigInt(n) -> Ok(PmBigInt(n))
     JsObject(ref) -> serialize_heap_object(heap, ref, seen)
-    JsSymbol(_) -> Error("cannot send Symbol between processes")
+    JsSymbol(id) -> Ok(value.PmSymbol(id))
     JsUninitialized -> Error("cannot send uninitialized value")
   }
 }
@@ -445,16 +445,22 @@ fn serialize_heap_object(
           kind: OrdinaryObject,
           properties:,
           symbol_properties:,
-          ..
-        )) ->
-          case dict.is_empty(symbol_properties) {
-            True ->
-              serialize_object_props(heap, dict.to_list(properties), seen, [])
-            False ->
-              Error(
-                "cannot send object with symbol properties between processes",
-              )
-          }
+          ..,
+        )) -> {
+          use props <- result.try(serialize_object_props(
+            heap,
+            dict.to_list(properties),
+            seen,
+            [],
+          ))
+          use sym_props <- result.try(serialize_symbol_props(
+            heap,
+            dict.to_list(symbol_properties),
+            seen,
+            [],
+          ))
+          Ok(PmObject(properties: props, symbol_properties: sym_props))
+        }
         Some(ObjectSlot(kind: PidObject(pid:), ..)) -> Ok(PmPid(pid))
         _ -> Error("cannot send functions or special objects between processes")
       }
@@ -486,9 +492,9 @@ fn serialize_object_props(
   entries: List(#(String, value.Property)),
   seen: set.Set(Int),
   acc: List(#(String, PortableMessage)),
-) -> Result(PortableMessage, String) {
+) -> Result(List(#(String, PortableMessage)), String) {
   case entries {
-    [] -> Ok(PmObject(list.reverse(acc)))
+    [] -> Ok(list.reverse(acc))
     [#(key, DataProperty(value: val, enumerable: True, ..)), ..rest] -> {
       use pm <- result.try(serialize_inner(heap, val, seen))
       serialize_object_props(heap, rest, seen, [#(key, pm), ..acc])
@@ -508,6 +514,29 @@ fn serialize_object_props(
   }
 }
 
+fn serialize_symbol_props(
+  heap: Heap,
+  entries: List(#(value.SymbolId, value.Property)),
+  seen: set.Set(Int),
+  acc: List(#(value.SymbolId, PortableMessage)),
+) -> Result(List(#(value.SymbolId, PortableMessage)), String) {
+  case entries {
+    [] -> Ok(list.reverse(acc))
+    [#(key, DataProperty(value: val, enumerable: True, ..)), ..rest] -> {
+      use pm <- result.try(serialize_inner(heap, val, seen))
+      serialize_symbol_props(heap, rest, seen, [#(key, pm), ..acc])
+    }
+    [#(_key, DataProperty(enumerable: False, ..)), ..] ->
+      Error(
+        "cannot send object with non-enumerable symbol property between processes",
+      )
+    [#(_key, value.AccessorProperty(..)), ..] ->
+      Error(
+        "cannot send object with accessor symbol property between processes",
+      )
+  }
+}
+
 // -- Message deserialization -------------------------------------------------
 
 /// Deserialize a PortableMessage into a JsValue, allocating objects on the heap.
@@ -523,6 +552,7 @@ pub fn deserialize(
     PmNumber(n) -> #(heap, JsNumber(n))
     PmString(s) -> #(heap, JsString(s))
     PmBigInt(n) -> #(heap, JsBigInt(n))
+    PmSymbol(id) -> #(heap, JsSymbol(id))
     PmPid(pid) ->
       alloc_pid_object(
         heap,
@@ -536,8 +566,10 @@ pub fn deserialize(
         common.alloc_array(heap, values, builtins.array.prototype)
       #(heap, JsObject(ref))
     }
-    PmObject(entries) -> {
+    PmObject(properties: entries, symbol_properties: sym_entries) -> {
       let #(heap, props) = deserialize_object_entries(heap, builtins, entries)
+      let #(heap, sym_props) =
+        deserialize_symbol_entries(heap, builtins, sym_entries)
       let #(heap, ref) =
         heap.alloc(
           heap,
@@ -546,7 +578,7 @@ pub fn deserialize(
             properties: dict.from_list(props),
             elements: js_elements.new(),
             prototype: Some(builtins.object.prototype),
-            symbol_properties: dict.new(),
+            symbol_properties: dict.from_list(sym_props),
             extensible: True,
           ),
         )
@@ -565,6 +597,21 @@ fn deserialize_list(
       let #(heap, vals) = acc
       let #(heap, val) = deserialize(heap, builtins, item)
       #(heap, [val, ..vals])
+    })
+  #(heap, list.reverse(rev))
+}
+
+fn deserialize_symbol_entries(
+  heap: Heap,
+  builtins: common.Builtins,
+  entries: List(#(value.SymbolId, PortableMessage)),
+) -> #(Heap, List(#(value.SymbolId, value.Property))) {
+  let #(heap, rev) =
+    list.fold(entries, #(heap, []), fn(acc, entry) {
+      let #(heap, props) = acc
+      let #(key, pm) = entry
+      let #(heap, val) = deserialize(heap, builtins, pm)
+      #(heap, [#(key, value.data_property(val)), ..props])
     })
   #(heap, list.reverse(rev))
 }

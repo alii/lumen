@@ -99,10 +99,8 @@ pub type State {
     job_queue: List(value.Job),
     /// REPL: set of global names declared with `const` (PutGlobal throws TypeError).
     const_globals: set.Set(String),
-    /// Next unique ID for Symbol() constructor. Starts at 100 (1-99 reserved for well-knowns).
-    next_symbol_id: Int,
     /// Descriptions for user-created symbols (Symbol("desc")).
-    symbol_descriptions: dict.Dict(Int, String),
+    symbol_descriptions: dict.Dict(value.SymbolId, String),
     /// ES2024 ToString — converts any JsValue to a string, including objects
     /// via ToPrimitive with VM re-entry. Set by the VM executor.
     js_to_string: fn(State, JsValue) ->

@@ -326,25 +326,25 @@ fn num_exp(a: value.JsNum, b: value.JsNum) -> value.JsNum {
 
 // -- FFI --
 
-@external(erlang, "arc_vm_ffi", "float_power")
+@external(erlang, "math", "pow")
 fn float_power(base: Float, exp: Float) -> Float
 
-@external(erlang, "arc_vm_ffi", "math_sqrt")
+@external(erlang, "math", "sqrt")
 fn ffi_math_sqrt(x: Float) -> Float
 
-@external(erlang, "arc_vm_ffi", "math_log")
+@external(erlang, "math", "log")
 fn ffi_math_log(x: Float) -> Float
 
-@external(erlang, "arc_vm_ffi", "math_sin")
+@external(erlang, "math", "sin")
 fn ffi_math_sin(x: Float) -> Float
 
-@external(erlang, "arc_vm_ffi", "math_cos")
+@external(erlang, "math", "cos")
 fn ffi_math_cos(x: Float) -> Float
 
-@external(erlang, "arc_vm_ffi", "math_floor")
+@external(erlang, "math", "floor")
 fn ffi_math_floor(x: Float) -> Float
 
-@external(erlang, "arc_vm_ffi", "math_ceil")
+@external(erlang, "math", "ceil")
 fn ffi_math_ceil(x: Float) -> Float
 
 fn parse_float(s: String) -> Result(Float, Nil) {
