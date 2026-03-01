@@ -27,16 +27,15 @@ import arc/vm/opcode.{
   ArrayPush, ArrayPushHole, ArraySpread, Await, BinOp, BitAnd, BitNot, BitOr,
   BitXor, BoxLocal, Call, CallApply, CallConstructor, CallConstructorApply,
   CallMethod, CallMethodApply, CallSuper, CreateArguments, DeclareGlobalLex,
-  NewRegExp,
   DeclareGlobalVar, DefineAccessor, DefineAccessorComputed, DefineField,
   DefineFieldComputed, DefineMethod, DeleteElem, DeleteField, Div, Dup,
   EnterFinallyThrow, Eq, Exp, ForInNext, ForInStart, GetBoxed, GetElem, GetElem2,
   GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetThis, Gt, GtEq,
   InitGlobalLex, InitialYield, IteratorClose, IteratorNext, Jump, JumpIfFalse,
   JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg,
-  NewObject, NotEq, ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed,
-  PutElem, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass, ShiftLeft,
-  ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
+  NewObject, NewRegExp, NotEq, ObjectSpread, Pop, Pos, PushConst, PushTry,
+  PutBoxed, PutElem, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass,
+  ShiftLeft, ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
   UShiftRight, UnaryOp, Void, Yield,
 }
 import arc/vm/value.{
@@ -2546,11 +2545,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           )
         }
         _ ->
-          Error(#(
-            VmError(StackUnderflow("NewRegExp")),
-            JsUndefined,
-            state.heap,
-          ))
+          Error(#(VmError(StackUnderflow("NewRegExp")), JsUndefined, state.heap))
       }
     }
 

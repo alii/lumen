@@ -10,9 +10,9 @@ import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type Ref, type RegExpNativeFn, AccessorProperty, DataProperty,
   Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsString, JsUndefined,
-  ObjectSlot, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags, RegExpGetGlobal,
-  RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline, RegExpGetSource,
-  RegExpGetSticky, RegExpGetUnicode, RegExpNative, RegExpObject,
+  ObjectSlot, RegExpConstructor, RegExpGetDotAll, RegExpGetFlags,
+  RegExpGetGlobal, RegExpGetHasIndices, RegExpGetIgnoreCase, RegExpGetMultiline,
+  RegExpGetSource, RegExpGetSticky, RegExpGetUnicode, RegExpNative, RegExpObject,
   RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
 }
 import gleam/dict
@@ -396,9 +396,9 @@ fn regexp_exec(
                     properties: props
                       |> dict.insert(
                         "index",
-                        value.data_property(JsNumber(Finite(int.to_float(
-                          match_start,
-                        )))),
+                        value.data_property(
+                          JsNumber(Finite(int.to_float(match_start))),
+                        ),
                       )
                       |> dict.insert(
                         "input",
@@ -493,8 +493,10 @@ fn regexp_flag_getter(
   state: State,
 ) -> #(State, Result(JsValue, JsValue)) {
   case this_regexp_value(state, this) {
-    Ok(#(_pattern, flags, _ref)) ->
-      #(state, Ok(JsBool(string.contains(flags, flag))))
+    Ok(#(_pattern, flags, _ref)) -> #(
+      state,
+      Ok(JsBool(string.contains(flags, flag))),
+    )
     Error(Nil) ->
       frame.type_error(
         state,
