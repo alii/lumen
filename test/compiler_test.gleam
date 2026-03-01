@@ -1669,11 +1669,11 @@ pub fn function_expression_named_name_test() -> Nil {
 }
 
 pub fn function_expression_anonymous_name_test() -> Nil {
-  assert_normal("var f = function() {}; f.name", JsString(""))
+  assert_normal("var f = function() {}; f.name", JsString("f"))
 }
 
 pub fn arrow_function_name_test() -> Nil {
-  assert_normal("var f = () => 1; f.name", JsString(""))
+  assert_normal("var f = () => 1; f.name", JsString("f"))
 }
 
 // ============================================================================
@@ -6418,7 +6418,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let assert vm.NormalCompletion(_, h) = harness_completion
 
   // Verify greetFromHarness is on globalThis object
-  let assert True = object.has_property(h, env.global_object, "greetFromHarness")
+  let assert True =
+    object.has_property(h, env.global_object, "greetFromHarness")
 
   // Step 2: Compile and run a module that uses the harness function
   let module_source = "greetFromHarness()"

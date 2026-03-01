@@ -350,7 +350,7 @@ fn emit_stmt_repl(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError)
               ast.VariableDeclarator(ast.IdentifierPattern(name), init) ->
                 case init {
                   Some(init_expr) -> {
-                    use e <- result.map(emit_expr(e, init_expr))
+                    use e <- result.map(emit_named_expr(e, init_expr, name))
                     emit_ir(e, IrScopePutVar(name))
                   }
                   None -> Ok(e)
@@ -371,7 +371,7 @@ fn emit_stmt_repl(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError)
                 let e = emit_ir(e, IrDeclareGlobalLex(name, is_const))
                 case init {
                   Some(init_expr) -> {
-                    use e <- result.map(emit_expr(e, init_expr))
+                    use e <- result.map(emit_named_expr(e, init_expr, name))
                     emit_ir(e, IrInitGlobalLex(name))
                   }
                   // let x; with no init → initialize to undefined
@@ -394,9 +394,11 @@ fn emit_stmt_repl(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError)
                 })
                 // Bind via destructuring, then init each lexical global
                 // Use VarBinding since names won't be in local scope
-                use e <- result.map(
-                  emit_destructuring_bind(e, pattern, VarBinding),
-                )
+                use e <- result.map(emit_destructuring_bind(
+                  e,
+                  pattern,
+                  VarBinding,
+                ))
                 // After destructuring, the names are in globals via PutGlobal.
                 // We need to move them to lexical — but destructuring already
                 // used ScopePutVar → PutGlobal. For destructuring let/const
@@ -1257,7 +1259,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
             // Emit initializer if present
             case init {
               Some(init_expr) -> {
-                use e <- result.map(emit_expr(e, init_expr))
+                use e <- result.map(emit_named_expr(e, init_expr, name))
                 emit_ir(e, IrScopePutVar(name))
               }
               None -> Ok(e)
@@ -1753,7 +1755,11 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // Assignment to identifier
     ast.AssignmentExpression(ast.Assign, ast.Identifier(name), right) -> {
-      use e <- result.map(emit_expr(e, right))
+      let inferred_name = case name {
+        "*default*" -> "default"
+        _ -> name
+      }
+      use e <- result.map(emit_named_expr(e, right, inferred_name))
       let e = emit_ir(e, IrDup)
       emit_ir(e, IrScopePutVar(name))
     }
@@ -2267,6 +2273,57 @@ fn emit_sequence(
   }
 }
 
+/// Like emit_expr, but if expr is an anonymous function/arrow/class definition,
+/// bake `name` into it (ES spec §8.4 NamedEvaluation).
+fn emit_named_expr(
+  e: Emitter,
+  expr: ast.Expression,
+  name: String,
+) -> Result(Emitter, EmitError) {
+  case expr {
+    // Anonymous function expression → bake name
+    ast.FunctionExpression(None, params, body, is_gen, is_async) -> {
+      let child =
+        compile_function_body(
+          e,
+          Some(name),
+          params,
+          body,
+          False,
+          is_gen,
+          is_async,
+        )
+      let #(e, idx) = add_child_function(e, child)
+      Ok(emit_ir(e, IrMakeClosure(idx)))
+    }
+    // Arrow function → bake name
+    ast.ArrowFunctionExpression(params, body, is_async) -> {
+      let body_stmt = case body {
+        ast.ArrowBodyExpression(expr_inner) ->
+          ast.BlockStatement([ast.ReturnStatement(Some(expr_inner))])
+        ast.ArrowBodyBlock(stmt) -> stmt
+      }
+      let child =
+        compile_function_body(
+          e,
+          Some(name),
+          params,
+          body_stmt,
+          True,
+          False,
+          is_async,
+        )
+      let #(e, idx) = add_child_function(e, child)
+      Ok(emit_ir(e, IrMakeClosure(idx)))
+    }
+    // Anonymous class expression → bake name
+    ast.ClassExpression(None, super_class, body) ->
+      compile_class(e, Some(name), super_class, body)
+    // Not anonymous → emit normally (named fn keeps its own name)
+    _ -> emit_expr(e, expr)
+  }
+}
+
 /// Emit one property in an object literal. Object is already on the stack.
 /// All handlers leave the object on the stack for the next property.
 fn emit_object_property(
@@ -2290,7 +2347,7 @@ fn emit_object_property(
         computed: False,
         ..,
       ) -> {
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(emit_named_expr(e, value, name))
       emit_ir(e, IrDefineField(name))
     }
 
@@ -2342,7 +2399,7 @@ fn emit_object_property(
         computed: False,
         ..,
       ) -> {
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(emit_named_expr(e, value, "get " <> name))
       emit_ir(e, IrDefineAccessor(name, opcode.Getter))
     }
 
@@ -2361,7 +2418,7 @@ fn emit_object_property(
         computed: False,
         ..,
       ) -> {
-      use e <- result.map(emit_expr(e, value))
+      use e <- result.map(emit_named_expr(e, value, "set " <> name))
       emit_ir(e, IrDefineAccessor(name, opcode.Setter))
     }
 
@@ -2757,7 +2814,10 @@ fn emit_destructuring_bind(
       let e = emit_ir(e, IrJumpIfFalse(has_val))
       // Value is undefined — pop it and use default
       let e = emit_ir(e, IrPop)
-      use e <- result.try(emit_expr(e, default_expr))
+      use e <- result.try(case left {
+        ast.IdentifierPattern(name) -> emit_named_expr(e, default_expr, name)
+        _ -> emit_expr(e, default_expr)
+      })
       let e = emit_ir(e, IrLabel(has_val))
       // Now the value (original or default) is on stack
       emit_destructuring_bind(e, left, binding_kind)

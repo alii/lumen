@@ -370,7 +370,15 @@ fn eval_module_body(
           global_object,
         )
 
-      case vm.run_module_with_imports(compiled.template, heap, builtins, global_object, import_globals) {
+      case
+        vm.run_module_with_imports(
+          compiled.template,
+          heap,
+          builtins,
+          global_object,
+          import_globals,
+        )
+      {
         vm.ModuleError(error: vm_err) -> {
           let error_val = JsString("InternalError: " <> string.inspect(vm_err))
           let state =

@@ -32,10 +32,10 @@ import arc/vm/opcode.{
   GetField, GetField2, GetGlobal, GetIterator, GetLocal, GetThis, Gt, GtEq,
   InitGlobalLex, InitialYield, IteratorClose, IteratorNext, Jump, JumpIfFalse,
   JumpIfNullish, JumpIfTrue, LogicalNot, Lt, LtEq, MakeClosure, Mod, Mul, Neg,
-  NewObject, NotEq, ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed, PutElem,
-  PutField, PutGlobal, PutLocal, Return, SetupDerivedClass, ShiftLeft, ShiftRight,
-  StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal, UShiftRight, UnaryOp,
-  Void, Yield,
+  NewObject, NotEq, ObjectSpread, Pop, Pos, PushConst, PushTry, PutBoxed,
+  PutElem, PutField, PutGlobal, PutLocal, Return, SetupDerivedClass, ShiftLeft,
+  ShiftRight, StrictEq, StrictNotEq, Sub, Swap, TypeOf, TypeofGlobal,
+  UShiftRight, UnaryOp, Void, Yield,
 }
 import arc/vm/value.{
   type FuncTemplate, type JsNum, type JsValue, type Ref, ArrayIteratorSlot,
@@ -611,21 +611,22 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
           Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
         // Not in lexical → try object record (globalThis)
         Error(_) ->
-          case
-            object.get_own_property(state.heap, state.global_object, name)
-          {
+          case object.get_own_property(state.heap, state.global_object, name) {
             Some(DataProperty(value: val, ..)) ->
-              Ok(
-                State(..state, stack: [val, ..state.stack], pc: state.pc + 1),
-              )
+              Ok(State(..state, stack: [val, ..state.stack], pc: state.pc + 1))
             Some(value.AccessorProperty(get: Some(getter), ..)) ->
-              case frame.call(state, getter, JsObject(state.global_object), []) {
+              case
+                frame.call(state, getter, JsObject(state.global_object), [])
+              {
                 Ok(#(val, state)) ->
                   Ok(
-                    State(..state, stack: [val, ..state.stack], pc: state.pc + 1),
+                    State(
+                      ..state,
+                      stack: [val, ..state.stack],
+                      pc: state.pc + 1,
+                    ),
                   )
-                Error(#(thrown, state)) ->
-                  Error(#(Thrown, thrown, state.heap))
+                Error(#(thrown, state)) -> Error(#(Thrown, thrown, state.heap))
               }
             Some(value.AccessorProperty(get: None, ..)) ->
               Ok(
@@ -637,9 +638,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
               )
             None ->
               // Check prototype chain
-              case
-                object.has_property(state.heap, state.global_object, name)
-              {
+              case object.has_property(state.heap, state.global_object, name) {
                 True ->
                   case
                     object.get_value_of(
@@ -659,8 +658,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                     Error(#(thrown, state)) ->
                       Error(#(Thrown, thrown, state.heap))
                   }
-                False ->
-                  throw_reference_error(state, name <> " is not defined")
+                False -> throw_reference_error(state, name <> " is not defined")
               }
           }
       }
@@ -672,8 +670,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
         [value, ..rest] -> {
           // 1. Check const lexical
           case set.contains(state.const_lexical_globals, name) {
-            True ->
-              throw_type_error(state, "Assignment to constant variable.")
+            True -> throw_type_error(state, "Assignment to constant variable.")
             False ->
               // 2. Check lexical globals
               case dict.get(state.lexical_globals, name) {
@@ -747,8 +744,7 @@ fn step(state: State, op: Op) -> Result(State, #(StepResult, JsValue, Heap)) {
                           JsObject(state.global_object),
                         )
                       {
-                        Ok(#(state, _)) ->
-                          Ok(State(..state, pc: state.pc + 1))
+                        Ok(#(state, _)) -> Ok(State(..state, pc: state.pc + 1))
                         Error(#(thrown, state)) ->
                           Error(#(Thrown, thrown, state.heap))
                       }
@@ -3212,7 +3208,7 @@ fn call_native_async_resume(
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
               lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
+              const_lexical_globals: final_state.const_lexical_globals,
               job_queue: list.append(final_state.job_queue, jobs),
             ),
           )
@@ -3228,7 +3224,7 @@ fn call_native_async_resume(
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
               lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
+              const_lexical_globals: final_state.const_lexical_globals,
               job_queue: list.append(final_state.job_queue, jobs),
             ),
           )
@@ -3265,7 +3261,7 @@ fn call_native_async_resume(
               stack: [JsUndefined, ..rest_stack],
               pc: state.pc + 1,
               lexical_globals: suspended.lexical_globals,
-          const_lexical_globals: suspended.const_lexical_globals,
+              const_lexical_globals: suspended.const_lexical_globals,
               job_queue: list.append(suspended.job_queue, jobs),
             ),
           )
@@ -3578,8 +3574,7 @@ fn call_native(
         Error(Nil) -> {
           let id = value.UserSymbol(builtins_symbol.new_symbol_ref())
           let new_registry = dict.insert(state.symbol_registry, key_str, id)
-          let new_descs =
-            dict.insert(state.symbol_descriptions, id, key_str)
+          let new_descs = dict.insert(state.symbol_descriptions, id, key_str)
           Ok(
             State(
               ..state,
@@ -3604,9 +3599,7 @@ fn call_native(
             Ok(#(key, _)) -> value.JsString(key)
             Error(Nil) -> value.JsUndefined
           }
-          Ok(
-            State(..state, stack: [val, ..rest_stack], pc: state.pc + 1),
-          )
+          Ok(State(..state, stack: [val, ..rest_stack], pc: state.pc + 1))
         }
         _ ->
           rethrow(thrown_type_error(
@@ -5118,7 +5111,7 @@ fn call_native_generator_next(
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
                   lexical_globals: suspended.lexical_globals,
-          const_lexical_globals: suspended.const_lexical_globals,
+                  const_lexical_globals: suspended.const_lexical_globals,
                   job_queue: suspended.job_queue,
                 ),
               )
@@ -5140,7 +5133,7 @@ fn call_native_generator_next(
                   stack: [result, ..rest_stack],
                   pc: state.pc + 1,
                   lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
+                  const_lexical_globals: final_state.const_lexical_globals,
                   job_queue: final_state.job_queue,
                 ),
               )
@@ -5353,7 +5346,7 @@ fn call_native_generator_throw(
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
                       lexical_globals: suspended.lexical_globals,
-          const_lexical_globals: suspended.const_lexical_globals,
+                      const_lexical_globals: suspended.const_lexical_globals,
                       job_queue: suspended.job_queue,
                     ),
                   )
@@ -5379,7 +5372,7 @@ fn call_native_generator_throw(
                       stack: [result, ..rest_stack],
                       pc: state.pc + 1,
                       lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
+                      const_lexical_globals: final_state.const_lexical_globals,
                       job_queue: final_state.job_queue,
                     ),
                   )
@@ -5583,7 +5576,7 @@ fn process_generator_return(
               stack: final_state.stack,
               locals: final_state.locals,
               lexical_globals: final_state.lexical_globals,
-          const_lexical_globals: final_state.const_lexical_globals,
+              const_lexical_globals: final_state.const_lexical_globals,
               job_queue: final_state.job_queue,
             )
           process_generator_return(
@@ -5630,7 +5623,7 @@ fn process_generator_return(
               stack: [result, ..rest_stack],
               pc: outer_state.pc + 1,
               lexical_globals: suspended.lexical_globals,
-          const_lexical_globals: suspended.const_lexical_globals,
+              const_lexical_globals: suspended.const_lexical_globals,
               job_queue: suspended.job_queue,
             ),
           )

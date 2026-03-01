@@ -228,7 +228,6 @@ type GlobalEntry {
   Builtin(name: String, val: value.JsValue)
 }
 
-
 fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
   case entry {
     Immutable(name:, val:) -> #(name, value.data(val))
@@ -239,10 +238,7 @@ fn global_entry_to_property(entry: GlobalEntry) -> #(String, value.Property) {
 /// Build the globalThis object on the heap with all built-in bindings.
 /// Returns updated heap + Ref to the globalThis heap object.
 /// The globalThis object IS the ObjectRecord of the Global Environment Record.
-pub fn globals(
-  b: Builtins,
-  h: Heap,
-) -> #(Heap, value.Ref) {
+pub fn globals(b: Builtins, h: Heap) -> #(Heap, value.Ref) {
   let entries = [
     // §19.1: these are {writable: false, enumerable: false, configurable: false}
     Immutable("NaN", value.JsNumber(value.NaN)),
