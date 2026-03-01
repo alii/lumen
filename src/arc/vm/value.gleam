@@ -1011,11 +1011,7 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
         NativeFunction(Dispatch(WeakSetNative(WeakSetConstructor(proto: ref)))) -> [
           ref,
         ]
-        NativeFunction(Call(BoundFunction(
-          target:,
-          bound_this:,
-          bound_args:,
-        ))) -> [
+        NativeFunction(Call(BoundFunction(target:, bound_this:, bound_args:))) -> [
           target,
           ..list.flatten([
             refs_in_value(bound_this),
