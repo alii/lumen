@@ -4046,12 +4046,32 @@ fn arc_spawn(
       _ -> Error("Arc.spawn: argument is not a function object")
     })
 
-    use #(callee_template, env_ref) <- result.try(
+    use spawner <- result.try(
       case heap.read(state.heap, fn_ref) {
         Some(ObjectSlot(
           kind: FunctionObject(func_template: callee_template, env: env_ref),
           ..,
-        )) -> Ok(#(callee_template, env_ref))
+        )) ->
+          Ok(fn() {
+            run_spawned_closure(
+              callee_template,
+              env_ref,
+              state.heap,
+              state.builtins,
+              state.globals,
+              state.symbol_descriptions,
+            )
+          })
+        Some(ObjectSlot(kind: NativeFunction(native), ..)) ->
+          Ok(fn() {
+            run_spawned_native(
+              native,
+              state.heap,
+              state.builtins,
+              state.globals,
+              state.symbol_descriptions,
+            )
+          })
         _ -> Error("Arc.spawn: argument is not a function")
       },
     )
@@ -4061,17 +4081,7 @@ fn arc_spawn(
         state.heap,
         state.builtins.object.prototype,
         state.builtins.function.prototype,
-        spawn(fn() {
-          run_spawned_closure(
-            callee_template,
-            env_ref,
-            // Copy everything we need:
-            state.heap,
-            state.builtins,
-            state.globals,
-            state.symbol_descriptions,
-          )
-        }),
+        spawn(spawner),
       )
 
     Ok(#(State(..state, heap:), Ok(pid_val)))
@@ -4136,6 +4146,58 @@ fn run_spawned_closure(
     }
     Error(_) -> Nil
   }
+}
+
+/// Run a native function in a standalone BEAM process.
+/// Sets up a minimal VM state and calls the native function directly.
+fn run_spawned_native(
+  native: value.NativeFn,
+  heap: Heap,
+  builtins: Builtins,
+  globals: dict.Dict(String, JsValue),
+  symbol_descriptions: dict.Dict(value.SymbolId, String),
+) -> Nil {
+  let empty_template =
+    value.FuncTemplate(
+      name: None,
+      arity: 0,
+      local_count: 0,
+      bytecode: array.from_list([]),
+      constants: array.from_list([]),
+      functions: array.from_list([]),
+      env_descriptors: [],
+      is_strict: False,
+      is_arrow: False,
+      is_derived_constructor: False,
+      is_generator: False,
+      is_async: False,
+    )
+  let state =
+    State(
+      stack: [],
+      locals: array.from_list([]),
+      constants: array.from_list([]),
+      globals:,
+      func: empty_template,
+      code: array.from_list([]),
+      heap:,
+      pc: 0,
+      call_stack: [],
+      try_stack: [],
+      finally_stack: [],
+      builtins:,
+      this_binding: JsUndefined,
+      callee_ref: None,
+      call_args: [],
+      job_queue: [],
+      const_globals: set.new(),
+      symbol_descriptions:,
+      js_to_string: js_to_string_callback,
+      call_fn: call_fn_callback,
+    )
+
+  let #(_state, _result) = dispatch_native(native, [], JsUndefined, state)
+  Nil
 }
 
 // ============================================================================
