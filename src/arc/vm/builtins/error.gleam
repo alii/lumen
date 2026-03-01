@@ -4,8 +4,9 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
-  type ErrorNativeFn, type JsValue, type Ref, ErrorConstructor, ErrorNative,
-  JsNull, JsObject, JsString, JsUndefined, ObjectSlot, OrdinaryObject,
+  type ErrorNativeFn, type JsValue, type Ref, Dispatch, ErrorConstructor,
+  ErrorNative, JsNull, JsObject, JsString, JsUndefined, ObjectSlot,
+  OrdinaryObject,
 }
 import gleam/dict
 import gleam/option.{Some}
@@ -47,7 +48,7 @@ pub fn init(
         #("message", value.builtin_property(JsString(""))),
         ..to_string_methods
       ],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "Error",
       1,
       [],
@@ -60,7 +61,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("TypeError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "TypeError",
       1,
       [],
@@ -71,7 +72,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("ReferenceError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "ReferenceError",
       1,
       [],
@@ -82,7 +83,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("RangeError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "RangeError",
       1,
       [],
@@ -93,7 +94,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("SyntaxError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "SyntaxError",
       1,
       [],
@@ -105,7 +106,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("EvalError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "EvalError",
       1,
       [],
@@ -116,7 +117,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("URIError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "URIError",
       1,
       [],
@@ -127,7 +128,7 @@ pub fn init(
       error.prototype,
       function_proto,
       [#("name", value.builtin_property(JsString("AggregateError")))],
-      fn(proto) { ErrorNative(ErrorConstructor(proto:)) },
+      fn(proto) { Dispatch(ErrorNative(ErrorConstructor(proto:))) },
       "AggregateError",
       1,
       [],

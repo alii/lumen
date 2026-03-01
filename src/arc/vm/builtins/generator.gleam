@@ -7,8 +7,7 @@ import arc/vm/builtins/common.{type GeneratorBuiltin, GeneratorBuiltin}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type Ref, CallNative, GeneratorNext, GeneratorReturn, GeneratorThrow,
-  ObjectSlot,
+  type Ref, GeneratorNext, GeneratorReturn, GeneratorThrow, ObjectSlot,
 }
 import gleam/dict
 import gleam/option.{Some}
@@ -22,10 +21,10 @@ pub fn init(
   function_proto: Ref,
 ) -> #(Heap, GeneratorBuiltin) {
   let #(h, methods) =
-    common.alloc_methods(h, function_proto, [
-      #("next", CallNative(GeneratorNext), 1),
-      #("return", CallNative(GeneratorReturn), 1),
-      #("throw", CallNative(GeneratorThrow), 1),
+    common.alloc_call_methods(h, function_proto, [
+      #("next", GeneratorNext, 1),
+      #("return", GeneratorReturn, 1),
+      #("throw", GeneratorThrow, 1),
     ])
 
   let symbol_properties =

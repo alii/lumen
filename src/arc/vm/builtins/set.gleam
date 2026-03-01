@@ -13,7 +13,7 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type MapKey, type Ref, type SetNativeFn, AccessorProperty,
-  Finite, JsBool, JsNull, JsNumber, JsObject, JsUndefined, ObjectSlot,
+  Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsUndefined, ObjectSlot,
   SetConstructor, SetNative, SetObject, SetPrototypeAdd, SetPrototypeClear,
   SetPrototypeDelete, SetPrototypeForEach, SetPrototypeGetSize, SetPrototypeHas,
 }
@@ -68,7 +68,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_props,
-    fn(proto) { SetNative(SetConstructor(proto:)) },
+    fn(proto) { Dispatch(SetNative(SetConstructor(proto:))) },
     "Set",
     0,
     [],

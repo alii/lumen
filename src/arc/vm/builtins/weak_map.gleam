@@ -8,7 +8,7 @@ import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type Ref, type WeakMapNativeFn, JsObject, JsUndefined,
+  type JsValue, type Ref, type WeakMapNativeFn, Dispatch, JsObject, JsUndefined,
   ObjectSlot, WeakMapConstructor, WeakMapNative, WeakMapObject,
   WeakMapPrototypeDelete, WeakMapPrototypeGet, WeakMapPrototypeHas,
   WeakMapPrototypeSet,
@@ -35,7 +35,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_methods,
-    fn(proto) { WeakMapNative(WeakMapConstructor(proto:)) },
+    fn(proto) { Dispatch(WeakMapNative(WeakMapConstructor(proto:))) },
     "WeakMap",
     0,
     [],

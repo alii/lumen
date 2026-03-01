@@ -5,7 +5,7 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
-  type Job, type JsValue, type Ref, BoxSlot, CallNative, JsBool, JsObject,
+  type Job, type JsValue, type Ref, BoxSlot, Call, JsBool, JsObject,
   NativeFunction, ObjectSlot, PromiseCatch, PromiseConstructor, PromiseFinally,
   PromiseObject, PromiseReaction, PromiseRejectFunction, PromiseRejectStatic,
   PromiseResolveFunction, PromiseResolveStatic, PromiseSlot, PromiseThen,
@@ -28,24 +28,24 @@ pub fn init(
   // §27.2.5.1 Promise.prototype.catch(onRejected)
   // §27.2.5.3 Promise.prototype.finally(onFinally)
   let #(h, proto_methods) =
-    common.alloc_methods(h, function_proto, [
-      #("then", CallNative(PromiseThen), 2),
-      #("catch", CallNative(PromiseCatch), 1),
-      #("finally", CallNative(PromiseFinally), 1),
+    common.alloc_call_methods(h, function_proto, [
+      #("then", PromiseThen, 2),
+      #("catch", PromiseCatch, 1),
+      #("finally", PromiseFinally, 1),
     ])
   // §27.2.4.5 Promise.resolve(x)
   // §27.2.4.4 Promise.reject(r)
   let #(h, static_methods) =
-    common.alloc_methods(h, function_proto, [
-      #("resolve", CallNative(PromiseResolveStatic), 1),
-      #("reject", CallNative(PromiseRejectStatic), 1),
+    common.alloc_call_methods(h, function_proto, [
+      #("resolve", PromiseResolveStatic, 1),
+      #("reject", PromiseRejectStatic, 1),
     ])
   common.init_type(
     h,
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { CallNative(PromiseConstructor) },
+    fn(_) { Call(PromiseConstructor) },
     "Promise",
     1,
     static_methods,
@@ -138,7 +138,7 @@ pub fn create_resolving_functions(
       h,
       ObjectSlot(
         kind: NativeFunction(
-          CallNative(PromiseResolveFunction(
+          Call(PromiseResolveFunction(
             promise_ref:,
             data_ref:,
             already_resolved_ref:,
@@ -161,7 +161,7 @@ pub fn create_resolving_functions(
       h,
       ObjectSlot(
         kind: NativeFunction(
-          CallNative(PromiseRejectFunction(
+          Call(PromiseRejectFunction(
             promise_ref:,
             data_ref:,
             already_resolved_ref:,

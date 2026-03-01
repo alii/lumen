@@ -1,10 +1,11 @@
 import arc/vm/builtins/common.{type BuiltinType, alloc_proto}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type Ref, CallNative, FunctionApply, FunctionBind, FunctionCall,
+  type Ref, Dispatch, FunctionApply, FunctionBind, FunctionCall,
   FunctionConstructor, FunctionToString, VmNative,
 }
 import gleam/dict
+import gleam/list
 import gleam/option.{Some}
 
 /// Set up Function.prototype and Function constructor.
@@ -15,10 +16,13 @@ pub fn init(h: Heap, object_proto: Ref) -> #(Heap, BuiltinType) {
 
   // Allocate methods with the real func_proto as their prototype
   let #(h, proto_methods) =
+    common.alloc_call_methods(h, func_proto, [
+      #("call", FunctionCall, 1),
+      #("apply", FunctionApply, 2),
+      #("bind", FunctionBind, 1),
+    ])
+  let #(h, to_string_methods) =
     common.alloc_methods(h, func_proto, [
-      #("call", CallNative(FunctionCall), 1),
-      #("apply", CallNative(FunctionApply), 2),
-      #("bind", CallNative(FunctionBind), 1),
       #("toString", VmNative(FunctionToString), 0),
     ])
 
@@ -27,8 +31,8 @@ pub fn init(h: Heap, object_proto: Ref) -> #(Heap, BuiltinType) {
     h,
     func_proto,
     func_proto,
-    proto_methods,
-    fn(_) { VmNative(FunctionConstructor) },
+    list.append(proto_methods, to_string_methods),
+    fn(_) { Dispatch(VmNative(FunctionConstructor)) },
     "Function",
     1,
     [],

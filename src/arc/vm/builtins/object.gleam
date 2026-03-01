@@ -6,8 +6,8 @@ import arc/vm/js_elements
 import arc/vm/object
 import arc/vm/value.{
   type JsElements, type JsValue, type ObjectNativeFn, type Ref, AccessorProperty,
-  ArrayObject, DataProperty, FunctionObject, GeneratorObject, JsBool, JsNull,
-  JsNumber, JsObject, JsString, JsSymbol, JsUndefined, NativeFunction,
+  ArrayObject, DataProperty, Dispatch, FunctionObject, GeneratorObject, JsBool,
+  JsNull, JsNumber, JsObject, JsString, JsSymbol, JsUndefined, NativeFunction,
   ObjectAssign, ObjectConstructor, ObjectCreate, ObjectDefineProperties,
   ObjectDefineProperty, ObjectEntries, ObjectFreeze, ObjectFromEntries,
   ObjectGetOwnPropertyDescriptor, ObjectGetOwnPropertyDescriptors,
@@ -92,7 +92,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { ObjectNative(ObjectConstructor) },
+    fn(_) { Dispatch(ObjectNative(ObjectConstructor)) },
     "Object",
     1,
     static_methods,

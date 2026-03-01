@@ -8,8 +8,8 @@ import arc/vm/frame.{type State, State}
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type JsValue, type Ref, type WeakSetNativeFn, JsBool, JsObject, JsUndefined,
-  ObjectSlot, WeakSetConstructor, WeakSetNative, WeakSetObject,
+  type JsValue, type Ref, type WeakSetNativeFn, Dispatch, JsBool, JsObject,
+  JsUndefined, ObjectSlot, WeakSetConstructor, WeakSetNative, WeakSetObject,
   WeakSetPrototypeAdd, WeakSetPrototypeDelete, WeakSetPrototypeHas,
 }
 import gleam/dict
@@ -33,7 +33,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_methods,
-    fn(proto) { WeakSetNative(WeakSetConstructor(proto:)) },
+    fn(proto) { Dispatch(WeakSetNative(WeakSetConstructor(proto:))) },
     "WeakSet",
     0,
     [],

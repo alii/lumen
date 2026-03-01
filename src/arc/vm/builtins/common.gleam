@@ -1,8 +1,9 @@
 import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
-  type ExoticKind, type JsValue, type NativeFn, type Property, type Ref,
-  ArrayObject, JsObject, JsString, NativeFunction, ObjectSlot, OrdinaryObject,
+  type CallNativeFn, type ExoticKind, type JsValue, type NativeFn,
+  type NativeFnSlot, type Property, type Ref, ArrayObject, Call, Dispatch,
+  JsObject, JsString, NativeFunction, ObjectSlot, OrdinaryObject,
 }
 import gleam/dict.{type Dict}
 import gleam/int
@@ -119,11 +120,22 @@ pub fn alloc_native_fn(
   name: String,
   arity: Int,
 ) -> #(Heap, Ref) {
+  alloc_native_fn_slot(h, function_proto, Dispatch(native), name, arity)
+}
+
+/// Allocate a NativeFunction ObjectSlot from a NativeFnSlot directly.
+fn alloc_native_fn_slot(
+  h: Heap,
+  function_proto: Ref,
+  slot: NativeFnSlot,
+  name: String,
+  arity: Int,
+) -> #(Heap, Ref) {
   let #(h, ref) =
     heap.alloc(
       h,
       ObjectSlot(
-        kind: NativeFunction(native),
+        kind: NativeFunction(slot),
         properties: dict.from_list([
           #("name", fn_name_property(name)),
           #("length", fn_length_property(arity)),
@@ -163,6 +175,22 @@ pub fn alloc_methods(
     let #(h, props) = acc
     let #(name, native, arity) = spec
     let #(h, fn_ref) = alloc_native_fn(h, function_proto, native, name, arity)
+    #(h, [#(name, value.builtin_property(JsObject(fn_ref))), ..props])
+  })
+}
+
+/// Batch allocate call-level native method objects (Function.call/apply/bind,
+/// Promise.then/catch, Generator.next/return/throw, etc.).
+pub fn alloc_call_methods(
+  h: Heap,
+  function_proto: Ref,
+  specs: List(#(String, CallNativeFn, Int)),
+) -> #(Heap, List(#(String, Property))) {
+  list.fold(specs, #(h, []), fn(acc, spec) {
+    let #(h, props) = acc
+    let #(name, native, arity) = spec
+    let #(h, fn_ref) =
+      alloc_native_fn_slot(h, function_proto, Call(native), name, arity)
     #(h, [#(name, value.builtin_property(JsObject(fn_ref))), ..props])
   })
 }
@@ -250,7 +278,7 @@ pub fn init_type(
   parent_proto: Ref,
   function_proto: Ref,
   proto_props: List(#(String, Property)),
-  ctor_fn: fn(Ref) -> NativeFn,
+  ctor_fn: fn(Ref) -> NativeFnSlot,
   name: String,
   arity: Int,
   ctor_props: List(#(String, Property)),
@@ -308,7 +336,7 @@ pub fn init_type_on(
   proto: Ref,
   function_proto: Ref,
   proto_props: List(#(String, Property)),
-  ctor_fn: fn(Ref) -> NativeFn,
+  ctor_fn: fn(Ref) -> NativeFnSlot,
   name: String,
   arity: Int,
   ctor_props: List(#(String, Property)),

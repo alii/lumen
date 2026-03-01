@@ -18,7 +18,7 @@ import arc/vm/value.{
   ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
   ArrayPrototypeSplice, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
   ArrayPrototypeToSpliced, ArrayPrototypeUnshift, ArrayPrototypeWith,
-  DataProperty, Finite, JsBool, JsNull, JsNumber, JsObject, JsString,
+  DataProperty, Dispatch, Finite, JsBool, JsNull, JsNumber, JsObject, JsString,
   JsUndefined, ObjectSlot,
 }
 import gleam/bool
@@ -82,7 +82,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { ArrayNative(ArrayConstructor) },
+    fn(_) { Dispatch(ArrayNative(ArrayConstructor)) },
     "Array",
     1,
     static_methods,

@@ -74,7 +74,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_methods,
-    fn(_) { value.CallNative(value.StringConstructor) },
+    fn(_) { value.Call(value.StringConstructor) },
     "String",
     1,
     static_methods,

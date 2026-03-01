@@ -3,7 +3,7 @@ import arc/vm/builtins/math as builtins_math
 import arc/vm/frame.{type State}
 import arc/vm/heap.{type Heap}
 import arc/vm/value.{
-  type JsNum, type JsValue, type NumberNativeFn, type Ref, Finite,
+  type JsNum, type JsValue, type NumberNativeFn, type Ref, Dispatch, Finite,
   GlobalIsFinite, GlobalIsNaN, GlobalParseFloat, GlobalParseInt, Infinity,
   JsNumber, JsObject, JsString, JsUndefined, NaN, NegInfinity, NumberConstructor,
   NumberIsFinite, NumberIsInteger, NumberIsNaN, NumberIsSafeInteger,
@@ -101,7 +101,7 @@ pub fn init(
       object_proto,
       function_proto,
       proto_methods,
-      fn(_) { NumberNative(NumberConstructor) },
+      fn(_) { Dispatch(NumberNative(NumberConstructor)) },
       "Number",
       1,
       ctor_props,

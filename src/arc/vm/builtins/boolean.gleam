@@ -4,7 +4,7 @@ import arc/vm/heap.{type Heap}
 import arc/vm/value.{
   type BooleanNativeFn, type JsValue, type Ref, BooleanConstructor,
   BooleanNative, BooleanObject, BooleanPrototypeToString,
-  BooleanPrototypeValueOf, JsBool, JsObject, JsString, ObjectSlot,
+  BooleanPrototypeValueOf, Dispatch, JsBool, JsObject, JsString, ObjectSlot,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -25,7 +25,7 @@ pub fn init(
       object_proto,
       function_proto,
       proto_methods,
-      fn(_) { BooleanNative(BooleanConstructor) },
+      fn(_) { Dispatch(BooleanNative(BooleanConstructor)) },
       "Boolean",
       1,
       [],

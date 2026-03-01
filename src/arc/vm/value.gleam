@@ -473,10 +473,16 @@ pub type WeakSetNativeFn {
   WeakSetPrototypeDelete
 }
 
-/// Callback for ToString that supports ToPrimitive (VM re-entry for objects).
-/// Builtins receive this from the dispatch layer to break the vm↔builtins cycle.
-/// Identifies a built-in native function. Used by `NativeFunction` to dispatch
-/// to the correct Gleam implementation when called from JS.
+/// What's stored in NativeFunction — either a dispatch-level or call-level native.
+/// Dispatch-level natives are handled by dispatch_native (simple return value).
+/// Call-level natives are handled by call_native (need stack manipulation, VM re-entry).
+pub type NativeFnSlot {
+  Dispatch(NativeFn)
+  Call(CallNativeFn)
+}
+
+/// Identifies a dispatch-level built-in native function.
+/// Routed through dispatch_native → per-module dispatch functions.
 pub type NativeFn {
   // Per-module dispatch wrappers
   MathNative(MathNativeFn)
@@ -492,9 +498,7 @@ pub type NativeFn {
   SetNative(SetNativeFn)
   WeakMapNative(WeakMapNativeFn)
   WeakSetNative(WeakSetNativeFn)
-  /// Handled in call_native — needs rest_stack, call_value, VM re-entry.
-  CallNative(CallNativeFn)
-  /// Handled in dispatch_native — simpler VM-level natives.
+  /// VM-level natives handled in dispatch_native — don't need stack manipulation.
   VmNative(VmNativeFn)
 }
 
@@ -585,7 +589,7 @@ pub type ExoticKind {
   FunctionObject(func_template: FuncTemplate, env: Ref)
   /// Built-in function implemented in Gleam, not bytecode.
   /// Callable like any function but dispatches to native code.
-  NativeFunction(native: NativeFn)
+  NativeFunction(native: NativeFnSlot)
   /// Promise object. The visible JS object has this kind, pointing to
   /// an internal PromiseSlot that holds state/reactions.
   PromiseObject(promise_data: Ref)
@@ -996,12 +1000,18 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
       }
       let kind_refs = case kind {
         FunctionObject(env: env_ref, func_template: _) -> [env_ref]
-        NativeFunction(ErrorNative(ErrorConstructor(proto: ref))) -> [ref]
-        NativeFunction(MapNative(MapConstructor(proto: ref))) -> [ref]
-        NativeFunction(SetNative(SetConstructor(proto: ref))) -> [ref]
-        NativeFunction(WeakMapNative(WeakMapConstructor(proto: ref))) -> [ref]
-        NativeFunction(WeakSetNative(WeakSetConstructor(proto: ref))) -> [ref]
-        NativeFunction(CallNative(BoundFunction(
+        NativeFunction(Dispatch(ErrorNative(ErrorConstructor(proto: ref)))) -> [
+          ref,
+        ]
+        NativeFunction(Dispatch(MapNative(MapConstructor(proto: ref)))) -> [ref]
+        NativeFunction(Dispatch(SetNative(SetConstructor(proto: ref)))) -> [ref]
+        NativeFunction(Dispatch(WeakMapNative(WeakMapConstructor(proto: ref)))) -> [
+          ref,
+        ]
+        NativeFunction(Dispatch(WeakSetNative(WeakSetConstructor(proto: ref)))) -> [
+          ref,
+        ]
+        NativeFunction(Call(BoundFunction(
           target:,
           bound_this:,
           bound_args:,
@@ -1012,25 +1022,25 @@ pub fn refs_in_slot(slot: HeapSlot) -> List(Ref) {
             list.flat_map(bound_args, refs_in_value),
           ])
         ]
-        NativeFunction(CallNative(PromiseResolveFunction(
+        NativeFunction(Call(PromiseResolveFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
         ))) -> [promise_ref, data_ref, already_resolved_ref]
-        NativeFunction(CallNative(PromiseRejectFunction(
+        NativeFunction(Call(PromiseRejectFunction(
           promise_ref:,
           data_ref:,
           already_resolved_ref:,
         ))) -> [promise_ref, data_ref, already_resolved_ref]
-        NativeFunction(CallNative(PromiseFinallyFulfill(on_finally:))) ->
+        NativeFunction(Call(PromiseFinallyFulfill(on_finally:))) ->
           refs_in_value(on_finally)
-        NativeFunction(CallNative(PromiseFinallyReject(on_finally:))) ->
+        NativeFunction(Call(PromiseFinallyReject(on_finally:))) ->
           refs_in_value(on_finally)
-        NativeFunction(CallNative(PromiseFinallyValueThunk(value:))) ->
+        NativeFunction(Call(PromiseFinallyValueThunk(value:))) ->
           refs_in_value(value)
-        NativeFunction(CallNative(PromiseFinallyThrower(reason:))) ->
+        NativeFunction(Call(PromiseFinallyThrower(reason:))) ->
           refs_in_value(reason)
-        NativeFunction(CallNative(AsyncResume(async_data_ref:, ..))) -> [
+        NativeFunction(Call(AsyncResume(async_data_ref:, ..))) -> [
           async_data_ref,
         ]
         PromiseObject(promise_data:) -> [promise_data]

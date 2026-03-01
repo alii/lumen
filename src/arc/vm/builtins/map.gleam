@@ -15,7 +15,7 @@ import arc/vm/heap.{type Heap}
 import arc/vm/js_elements
 import arc/vm/value.{
   type JsValue, type MapKey, type MapNativeFn, type Ref, AccessorProperty,
-  ArrayObject, JsBool, JsNumber, JsObject, JsUndefined, MapConstructor,
+  ArrayObject, Dispatch, JsBool, JsNumber, JsObject, JsUndefined, MapConstructor,
   MapNative, MapObject, MapPrototypeClear, MapPrototypeDelete,
   MapPrototypeForEach, MapPrototypeGet, MapPrototypeGetSize, MapPrototypeHas,
   MapPrototypeSet, ObjectSlot,
@@ -92,7 +92,7 @@ pub fn init(
     object_proto,
     function_proto,
     proto_methods,
-    fn(proto) { MapNative(MapConstructor(proto:)) },
+    fn(proto) { Dispatch(MapNative(MapConstructor(proto:))) },
     "Map",
     0,
     [],
